@@ -1,0 +1,314 @@
+{% load static %}
+{% load widget_tweaks %}
+
+{% block page_meta %}
+	<title>SIESTA: Extract Features</title>
+	<meta name="title" content="Extract Features">
+{% endblock %}
+
+{% block content %}
+	<h2>Feature Extraction</h2>
+
+	<body>
+		<div>This page will extract features to be used for sleep scoring. Please select the .edf file you wish to score and specify sampling rate of the data as well as the corresponding ECoG and EMG channels.</div>
+		<div>Features will be extracted in epoch bin inputed (note: data were trained on 10 second epochs). Second ECoG channel is optional.</div>
+		<div>Once completed, a .csv file with your features will be downloaded automatically.</div>
+	</body>
+
+	<form id="extract-form" method="POST" action='/extract-features/' class="inline-form">
+		{% csrf_token %}
+		{% for hidden in form.hidden_fields %}
+			{{ hidden }}
+		{% endfor %}
+
+		{% for field in form.visible_fields %}
+			<div class="form-group">
+				<label for="{{ field.id_for_label }}">{{ field.label }}</label>
+				{{ field|add_class:'form-control update-field' }}
+				{% for error in field.errors %}
+					<span class="help-block">{{ error }}</span>
+				{% endfor %}
+			</div>
+		{% endfor %}
+	</form>
+
+	<div id="extract-drop-zone" class="drop-zone">
+		<p>Drag & drop files here or click to upload</p>
+		<input type="file" id="extract-file-input" accept='.edf' multiple style="display: none;">
+        <ul class="file-list" id="extract-file-list"></ul>
+    </div>
+
+	<script type="text/javascript">
+		let filesArray = [];
+		let uploadedFiles = [];
+        let pendingUploads = [];
+		let isUploading = false;
+        let pendingSubmissions = [];
+        let isProcessing = false;
+
+		const dropZone = document.getElementById('extract-drop-zone');
+		const fileInput = document.getElementById('extract-file-input');
+		const fileList = document.getElementById('extract-file-list');
+
+		let isFirstLoad = true;
+
+        const handleUpdate = () => {
+            const formData = new FormData(document.getElementById('extract-form'));
+            formData.append('ajax_update', 'true');
+
+            fetch('/extract-features/', {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'X-CSRFToken': '{{ csrf_token }}'
+                }
+            })
+            .then(response => response.json());
+        };
+
+		document.querySelectorAll('.update-field').forEach(field => {
+			field.addEventListener('change', () => {
+				if (isFirstLoad) {
+					isFirstLoad = false;
+				} else {
+					handleUpdate();
+				}
+			});
+		});
+
+		if (isFirstLoad) {
+			handleUpdate();
+			isFirstLoad = false;
+		}
+
+	    function updateProgressBarExtract(file, progress, text = '', fileName = null) {
+            const finalFileName = fileName || file.name;
+            const fileItem = document.querySelector(`[data-file-name="${finalFileName}"]`);
+            if (!fileItem) return;
+
+            const progressBar = fileItem.querySelector('.progress-bar');
+            const statusRow = fileItem.querySelector('.file-status');
+
+            if (text == 'Downloading...') {
+                progressBar.style.width = "100%";
+                statusRow.textContent = `${text}`;
+            } else if (text == 'Failed') {
+                progressBar.style.width = "0%";
+                statusRow.textContent = `${'Failed. Did you choose the right channels?'}`;
+
+                const submitButton = fileItem.submitButton;
+                submitButton.textContent = 'Retry';
+                submitButton.disabled = false;
+                submitButton.style.backgroundColor = "";
+                submitButton.style.cursor = "pointer";
+            } else if (progressBar) {
+                progressBar.style.width = `${progress}%`;
+
+                if (progress === 100) {
+                    statusRow.textContent = `Upload Complete`;
+                } else if (text) {
+                    statusRow.textContent = `${text} ${Math.round(progress)}%`;
+                } else {
+                    statusRow.textContent = `Uploading... ${Math.round(progress)}%`;
+                }
+            }
+
+            if (progress === 100 && text !== 'Downloading...') {
+                fileItem.dataset.completed = "true";
+
+                if (!fileItem.querySelector('.submit-btn')) {
+                    const submitButton = document.createElement('button');
+                    submitButton.classList.add('submit-btn');
+                    submitButton.textContent = 'Extract';
+
+                    submitButton.onclick = function() {
+                        pendingSubmissions.push(file);
+                        extractNext();
+
+                        submitButton.disabled = true;
+                        submitButton.textContent = 'Waiting...';
+                        submitButton.style.backgroundColor = '#cccccc';
+                        submitButton.style.cursor = 'not-allowed';
+                    };
+
+                    fileItem.submitButton = submitButton;
+                    fileItem.appendChild(submitButton);
+                }
+            }
+        }
+
+       async function updateFileList() {
+            filesArray.forEach((file) => {
+                let existingFileItem = document.querySelector(`[data-file-name="${file.name}"]`);
+
+                if (!existingFileItem) {
+                    const li = document.createElement("li");
+                    li.classList.add("file-item");
+                    li.setAttribute("data-file-name", file.name);
+
+                    const fileName = document.createElement("div");
+                    fileName.textContent = file.name.split('.').slice(0, -1).join('.');
+                    fileName.classList.add("file-name");
+                    li.appendChild(fileName);
+
+                    const statusRow = document.createElement("div");
+                    statusRow.textContent = 'Pending...';
+                    statusRow.classList.add("file-status");
+                    li.appendChild(statusRow);
+
+                    const progressBar = document.createElement("div");
+                    progressBar.classList.add("progress-bar");
+                    li.appendChild(progressBar);
+
+                    file.statusRow = statusRow;
+                    file.liElement = li;
+                    file.progressBar = progressBar;
+
+                    fileList.appendChild(li);
+                }
+            });
+        }
+
+        async function uploadFiles() {
+            if (isUploading) return;
+            isUploading = true;
+
+            while (filesArray.length > 0) {
+                const file = filesArray[0];
+
+                if (!uploadedFiles.includes(file.name)) {
+                    const fileItem = document.querySelector(`[data-file-name="${file.name}"]`);
+                    if (fileItem) {
+                        fileItem.querySelector('.file-status').textContent = 'Uploading...';
+                    }
+
+                    await uploadFile(file, updateProgressBarExtract);
+                    uploadedFiles.push(file.name);
+                }
+
+                filesArray.shift();
+            }
+
+            isUploading = false;
+
+            if (pendingUploads.length > 0) {
+                filesArray.push(...pendingUploads);
+                pendingUploads = [];
+                uploadFiles();
+            }
+        }
+
+        function extractNext() {
+            if (isProcessing || pendingSubmissions.length === 0) return;
+
+            isProcessing = true;
+            const nextFile = pendingSubmissions.shift();
+            console.log(pendingSubmissions);
+            console.log(nextFile);
+            console.log(nextFile.name);
+
+
+            const fileItem = document.querySelector(`[data-file-name="${nextFile.name}"]`);
+            const updatedFileName = fileItem ? fileItem.getAttribute("data-file-name") : nextFile.name;
+
+            submitFileData(nextFile, updatedFileName);
+        }
+
+        function submitFileData(file, fileName) {
+            let formData = new FormData();
+            formData.append('fileName', fileName);
+
+            const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+            formData.append('csrfmiddlewaretoken', csrfToken);
+
+            $.ajax({
+                method: 'POST',
+                url: '/extract-features/',
+                data: formData,
+                cache: false,
+                contentType: false,
+                processData: false,
+                success: function(response) {
+                    task_state(file, response.task_id, fileName);
+                },
+                error: function(response) {
+                    alert(response["responseJSON"]["error"]);
+                }
+            });
+        }
+
+        function task_state(file, task_id, fileName) {
+            $.ajax({
+                method: 'GET',
+                url: "{% url 'validate_task_state' %}",
+                data: {'task_id': task_id},
+                cache: false,
+                success: function(response) {
+                    if (response.state != 'SUCCESS') {
+                        if (response.state == 'FAILURE') {
+                            updateProgressBarExtract(file, 0, 'Failed', fileName);
+                        } else {
+                            if (`${response.state}` == 'PENDING') {
+                                updateProgressBarExtract(file, 0, 'Processing...', fileName);
+                            } else {
+                                updateProgressBarExtract(file, response.state, 'Extracted...', fileName);
+                            }
+
+                            setTimeout(function () {
+                                task_state(file, task_id, fileName);
+                            }, update_ms);
+                            return;
+                        }
+                    } else if (response.state == 'SUCCESS') {
+                        download_file(task_id, "{% url 'download_csv' %}", fileName.replace(/\.edf$/, '_features.csv'), true);
+                        updateProgressBarExtract(file, 100, 'Downloading...', fileName);
+                    }
+
+                    isProcessing = false;
+                    extractNext();
+                },
+                error: function(response) {
+                    alert(response["responseJSON"]["error"]);
+                    isProcessing = false;
+                    extractNext();
+                }
+            });
+        }
+
+    	dropZone.addEventListener("drop", (event) => {
+    		event.preventDefault();
+    		let newFiles = Array.from(event.dataTransfer.files);
+    		filesArray = [...filesArray, ...newFiles];
+    		updateFileList();
+    	});
+
+    	dropZone.addEventListener("dragover", (event) => {
+    		event.preventDefault();
+    		dropZone.classList.add("drag-over");
+    	});
+
+    	dropZone.addEventListener("dragleave", () => {
+    		dropZone.classList.remove("drag-over");
+    	});
+
+    	dropZone.addEventListener("click", (event) => {
+    		if (!event.target.classList.contains('submit-btn')) {
+    			fileInput.click();
+    		}
+    	});
+
+        fileInput.addEventListener("change", () => {
+            let newFiles = Array.from(fileInput.files);
+
+            newFiles.forEach((file) => {
+                if (!filesArray.some(f => f.name === file.name) && !uploadedFiles.includes(file.name)) {
+                    filesArray.push(file);
+                }
+            });
+
+            updateFileList();
+            uploadFiles();
+            fileInput.value = "";
+        });
+	</script>
+{% endblock %}

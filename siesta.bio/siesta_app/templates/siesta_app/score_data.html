@@ -1,0 +1,435 @@
+{% load static %}
+
+{% block page_meta %}
+	<title>SIESTA: Score Data</title>
+	<meta name="title" content="Score Data">
+{% endblock %}
+
+{% block content %}
+	<h2>Score Data</h2>
+
+	<body>
+		<div>This page will score sleep stages based on extracted features. You can either use our pre-trained model (trained using 10-second epochs) or upload a new model if needed.</div>
+
+		<div>Once completed, a .csv file with your time-matched sleep scores will be downloaded automatically.</div>
+	</body>
+
+    <form id="score-form" method="POST" enctype="multipart/form-data" action="/score-data/">
+        {% csrf_token %}
+        {{ form.as_p }}
+
+        <input type="hidden" id="model" name="model" value="">
+        <div class="radio-container">
+            <input type="radio" id="pre-trained-radio" name="model_type" value="pre-trained">
+            <label for="pre-trained-radio">Score using pre-trained model</label>
+            &nbsp;&nbsp;&nbsp;
+            <input type="radio" id="new-model-radio" name="model_type" value="new">
+            <label for="new-model-radio">Score using a new model</label>
+        </div>
+
+        <div class="form-row">
+            <label for="new-model-file" class="file-label" id="new-model-prompt">Model loaded and ready! Upload new model .file, if desired: </label>
+            <input type="file" id="new-model-file" name="newModel" accept=".file" class="file-input">
+        </div>
+    </form>
+
+	<form id="score-form" method="POST" enctype="multipart/form-data" action="/score-data/">
+        {% csrf_token %}
+    </form>
+
+    <div id="score-drop-zone" class="drop-zone">
+        <p>Drag & drop files here or click to upload</p>
+        <input type="file" id="score-file-input" accept='.csv' multiple style="display: none;">
+        <ul id='score-file-list' class="file-list"></ul>
+    </div>
+
+	{% if messages %}
+		{% for message in messages %}
+			<div class="alert alert-{{ message.tags }}">
+				{{ message }}
+			</div>
+		{% endfor %}
+	{% endif %}
+
+	<script type="text/javascript">
+        let scoreArray = [];
+        let uploadedScoreFiles = [];
+        let pendingScoreUploads = [];
+        let isUploadingScore = false;
+        let pendingScoreSubmissions = [];
+        let isProcessingScore = false;
+        let modelType;
+        let newModelExists;
+
+        const newModelFile = document.getElementById("new-model-file");
+        const modelInput = document.getElementById("model");
+        const newModelPrompt = document.getElementById("new-model-prompt");
+
+		const dropZone = document.getElementById('score-drop-zone');
+		const fileInput = document.getElementById('score-file-input');
+		const fileList = document.getElementById('score-file-list');
+
+		updateScoreList();
+        setModelTypeFromSession();
+
+        function setModelTypeFromSession() {
+            const modelType = sessionStorage.getItem('modelType');
+
+            if (modelType) {
+                const preTrainedRadio = document.getElementById("pre-trained-radio");
+                const newModelRadio = document.getElementById("new-model-radio");
+
+                if (modelType === 'pre-trained') {
+                    preTrainedRadio.checked = true;
+                } else if (modelType === 'new') {
+                    newModelRadio.checked = true;
+
+                    newModelFile.style.visibility = "visible";
+                    modelInput.style.visibility = "hidden";
+                    newModelPrompt.style.visibility = "visible";
+
+                    if (newModelFile.value === '' && !newModelExists) {
+                        newModelPrompt.textContent = 'Upload a new model (.file):';
+                    } else {
+                        newModelPrompt.textContent = 'Model loaded and ready! Upload new model .file, if desired: ';
+
+                    }
+                }
+            }
+        }
+
+        function checkModelExists() {
+            fileExistsOnServer(sessionStorage.getItem('newModel'))
+                .then((newModelExists) => {
+
+                    const submitButtons = document.querySelectorAll('.submit-btn');
+
+                    if (!newModelExists && modelType === 'new') {
+                        if (sessionStorage.getItem('newModel')) {
+                            sessionStorage.removeItem('newModel');
+                        }
+                        newModelExists = false;
+                        submitButtons.forEach((button) => {
+                            button.disabled = true;
+                            button.style.backgroundColor = "#cccccc";
+                            button.style.cursor = "not-allowed";
+                        });
+                    } else {
+                        newModelExists = true;
+                        submitButtons.forEach((button) => {
+                            button.disabled = false;
+                            button.style.backgroundColor = "";
+                            button.style.cursor = "";
+                        });
+                    }
+                })
+                .catch((err) => {
+                    console.error('Error checking file:', err);
+                });
+        }
+
+        function createScoreButton(file, li) {
+            const submitButton = document.createElement('button');
+            submitButton.classList.add('submit-btn');
+            submitButton.textContent = 'Score';
+
+            submitButton.onclick = function () {
+                let formData = new FormData();
+                formData.append('fileName', file.name);
+                formData.append('modelName', sessionStorage.getItem('newModel'));
+
+                const model = document.querySelector('input[name="model_type"]:checked');
+                if (model) {
+                    modelType = model.value;
+                    formData.append('modelType', modelType);
+                } else {
+                    alert('Please select a model type.');
+                    return;
+                }
+
+                if (modelType == 'new' && !sessionStorage.getItem('newModel')) {
+                    alert('Please upload a new model.');
+                    return;
+                }
+
+                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+                formData.append('csrfmiddlewaretoken', csrfToken);
+
+                submitButton.disabled = true;
+                submitButton.style.backgroundColor = '#cccccc';
+                submitButton.style.cursor = 'not-allowed';
+                submitButton.textContent = 'Scoring...';
+
+                const form = document.getElementById('score-form');
+
+                $.ajax({
+                    method: form.method,
+                    url: form.action,
+                    data: formData,
+                    cache: false,
+                    contentType: false,
+                    processData: false,
+                    success: function (response) {
+                        task_state_scoring(file, response.task_id, Date.now(), file.name);
+                    },
+                    error: function (response) {
+                        submitButton.textContent = 'Retry';
+                        submitButton.disabled = false;
+                        submitButton.style.backgroundColor = "";
+                        submitButton.style.cursor = "pointer";
+                    }
+                });
+            };
+
+            li.appendChild(submitButton);
+        }
+
+        document.getElementById("pre-trained-radio").addEventListener("change", function() {
+            modelType = document.querySelector('input[name="model_type"]:checked').value;
+            sessionStorage.setItem("modelType", modelType);
+            checkModelExists();
+
+            newModelFile.style.visibility = "hidden";
+            modelInput.value = "";
+            newModelPrompt.style.visibility = "hidden";
+        });
+
+        document.getElementById("new-model-radio").addEventListener("change", function() {
+            modelType = document.querySelector('input[name="model_type"]:checked').value;
+            sessionStorage.setItem("modelType", modelType);
+            checkModelExists();
+
+            newModelFile.style.visibility = "visible";
+            newModelPrompt.style.visibility = "visible";
+
+            if (newModelFile.value === '' && !sessionStorage.getItem('newModel')) {
+                newModelPrompt.textContent = 'Upload a new model (.file):';
+            } else {
+                newModelPrompt.textContent = 'Model loaded and ready! Upload new model .file, if desired: ';
+
+            }
+        });
+
+		$('#new-model-file').on('change', async function(e) {
+			const file = document.getElementById('new-model-file').files[0];
+
+            if (file) {
+                sessionStorage.setItem('newModel', file.name);
+
+                try {
+                    await uploadFile(file, updateProgressBarScore, true);
+                    checkModelExists();
+                } catch (error) {
+                    console.error('Error during file upload:', error);
+                }
+            }
+		});
+
+        function addFileToList(file, status = 'Pending...') {
+            let existingFileItem = document.querySelector(`[data-file-name="${file.name}"]`);
+
+            if (!existingFileItem) {
+                const li = document.createElement("li");
+                li.classList.add("file-item");
+                li.setAttribute("data-file-name", file.name);
+
+                const deletable = makeDeletable(file, li);
+                li.appendChild(deletable);
+
+                const fileName = document.createElement("div");
+                fileName.textContent = file.name.split('.').slice(0, -1).join('.');
+                fileName.classList.add("file-name");
+                fileName.title = file.name;
+                li.appendChild(fileName);
+
+                const statusRow = document.createElement("div");
+                statusRow.textContent = status;
+                statusRow.classList.add("file-status");
+                li.appendChild(statusRow);
+
+                const progressBar = document.createElement("div");
+                progressBar.classList.add("progress-bar");
+                li.appendChild(progressBar);
+
+                if (status === 'Uploaded') {
+                    progressBar.style.width = "100%";
+                    progressBar.classList.add("uploaded");
+                    createScoreButton(file, li);
+                }
+
+                file.statusRow = statusRow;
+                file.liElement = li;
+                file.progressBar = progressBar;
+
+                fileList.prepend(li);
+            }
+        }
+
+        async function updateScoreList() {
+            scoreArray.forEach((file) => {
+                addFileToList(file);
+            });
+
+            try {
+                const response = await fetch('/check-server-files/');
+                const data = await response.json();
+                const serverFiles = data.files || [];
+
+                serverFiles.forEach((serverFileName) => {
+                    let existingFileItem = document.querySelector(`[data-file-name="${serverFileName}"]`);
+
+                    if (!existingFileItem && !scoreArray.some((file) => file.name === serverFileName)) {
+                        const file = { name: serverFileName };
+                        addFileToList(file, 'Uploaded');
+                    }
+                });
+            } catch (error) {
+                console.error("Failed to fetch server files:", error);
+            }
+        }
+
+        async function uploadScoreFiles() {
+            if (isUploadingScore) return;
+            isUploadingScore = true;
+
+            while (scoreArray.length > 0) {
+                const file = scoreArray[0];
+
+                if (!uploadedScoreFiles.includes(file.name)) {
+                    const fileItem = document.querySelector(`[data-file-name="${file.name}"]`);
+                    if (fileItem) {
+                        fileItem.querySelector('.file-status').textContent = 'Uploading...';
+                    }
+
+                    await uploadFile(file, updateProgressBarScore, true);
+                    uploadedScoreFiles.push(file.name);
+                }
+
+                scoreArray.shift();
+            }
+
+            isUploadingScore = false;
+
+            if (pendingScoreUploads.length > 0) {
+                scoreArray.push(...pendingScoreUploads);
+                pendingScoreUploads = [];
+                uploadFiles();
+            }
+        }
+
+        function updateProgressBarScore(file, progress, text = '', fileName = null) {
+            const finalFileName = fileName || file.name;
+            const fileItem = document.querySelector(`[data-file-name="${finalFileName}"]`);
+            if (!fileItem) return;
+
+            const progressBar = fileItem.querySelector('.progress-bar');
+            const statusRow = fileItem.querySelector('.file-status');
+            const submitButton = fileItem.querySelector('.submit-btn');
+
+            if (text == 'Downloading...') {
+                statusRow.textContent = `${text}`;
+
+                submitButton.disabled = false;
+                submitButton.textContent = 'Score';
+                submitButton.style.backgroundColor = "";
+                submitButton.style.cursor = "pointer";
+
+                progressBar.classList.remove("uploaded");
+                progressBar.classList.add("downloaded");
+            }
+            else if (text == 'Failed') {
+                progressBar.style.width = "0%";
+                statusRow.textContent = 'Failed. Did you choose the right model?';
+
+                submitButton.textContent = 'Retry';
+                submitButton.disabled = false;
+                submitButton.style.backgroundColor = "";
+                submitButton.style.cursor = "pointer";
+            }
+            else if (progressBar) {
+                progressBar.style.width = `${progress}%`;
+
+                if (progress >= 100) {
+                    statusRow.textContent = 'Uploaded';
+                    progressBar.classList.add("uploaded");
+                    createScoreButton(file, fileItem);
+                } else if (text) {
+                    statusRow.textContent = `${text} ${Math.round(progress)}%`;
+                } else {
+                    statusRow.textContent = `Uploading... ${Math.round(progress)}%`;
+                }
+            }
+        }
+
+		function task_state_scoring(file, task_id, startTime, fileName) {
+			$.ajax({
+				method: 'GET',
+				url: {% url 'validate_task_state' %},
+				data: {'task_id': task_id},
+
+				cache: false,
+
+                success: function(response){
+                    if (response.state != 'SUCCESS') {
+                        if (response.state == 'FAILURE') {
+                            updateProgressBarScore(file, 0, 'Failed', fileName);
+                        } else {
+                            var elapsedTime = Math.floor((Date.now() - startTime) / update_ms);
+
+                            const minutes = Math.floor(elapsedTime / 60);
+                            const seconds = elapsedTime % 60;
+
+                            setTimeout(function () {
+                                task_state_scoring(file, task_id, startTime, fileName);
+                            }, update_ms);
+                        }
+                    } else if (response.state == 'SUCCESS') {
+                        download_file(task_id, "{% url 'download_csv' %}", fileName.replace('features', 'scores'), false);
+                        updateProgressBarScore(file, 100, 'Downloading...', fileName);
+                    }
+                },
+				error: function (response){
+					alert(response["responseJSON"]["error"]);
+				}
+			});
+		};
+
+		dropZone.addEventListener("drop", (event) => {
+    		event.preventDefault();
+    		let newFiles = Array.from(event.dataTransfer.files);
+    		scoreArray = [...scoreArray, ...newFiles];
+    		updateScoreList();
+    	});
+
+    	dropZone.addEventListener("dragover", (event) => {
+    		event.preventDefault();
+    		dropZone.classList.add("drag-over");
+    	});
+
+    	dropZone.addEventListener("dragleave", () => {
+    		dropZone.classList.remove("drag-over");
+    	});
+
+        dropZone.addEventListener("click", (event) => {
+            if (!event.target.classList.contains('trash-icon') && !event.target.closest('.trash-icon')) {
+                if (!event.target.classList.contains('submit-btn')) {
+                    fileInput.click();
+                }
+            }
+        });
+
+        fileInput.addEventListener("change", () => {
+            let newFiles = Array.from(fileInput.files);
+
+            newFiles.forEach((file) => {
+                if (!scoreArray.some(f => f.name === file.name) && !uploadedScoreFiles.includes(file.name)) {
+                    scoreArray.push(file);
+                }
+            });
+
+            updateScoreList();
+            uploadScoreFiles();
+            fileInput.value = "";
+        });
+	</script>
+{% endblock %}

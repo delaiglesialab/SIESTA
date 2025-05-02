@@ -1,0 +1,1299 @@
+```{r setup (run this first), warning=FALSE, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE)
+options(warn = -1) 
+options(max.print = 100)
+
+library("lubridate")
+library("reticulate")
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+library("ggetho")
+library("edf")
+library("cowplot")
+library("patchwork")
+library("readr")
+library("stats")
+library("cluster")
+library("ggdendro")
+library("reshape2")
+library("viridis")
+library("ggfortify")
+library("plotly")
+library("MASS")
+library("caret")
+library("here")
+library("scales")
+library("zoo")
+library("DescTools")
+library("stringr")
+library("purrr")
+library("cosinor2")
+library("caret")
+```
+
+``` {r Model Comparison}
+getSelectionFile <- function(fileDir, isFit = FALSE) {
+  toMinutes <- ifelse(isFit, 60, 1)
+  
+  fit <- read.csv(fileDir)
+  fit <- data.frame(model = gsub("\\.", " ", names(fit)), 
+                    mean = colMeans(fit)/toMinutes, 
+                    se = apply(fit, 2, function(x) sd(x) / sqrt(length(x)))/toMinutes, 
+                    row.names = NULL)
+  
+  return(fit)
+}
+
+plotModelComparison <- function(data, labels, accuracy = TRUE, cutoff = NULL) {
+  alphanum <- 0.4
+  
+  if (!is.null(cutoff)) {
+    if (accuracy) {
+      data$alphavals <- ifelse(data$mean < cutoff, alphanum, 1)
+    } else {
+      data$alphavals <- ifelse(data$mean > cutoff, alphanum, 1)
+    }
+  } else {
+    data$alphavals <- 1
+  }
+  
+  fig <- ggplot(data, aes(x = labels, y = mean, color = labels, alpha = alphavals)) +
+    theme_minimal() +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = mean - se, ymax = mean + se), linewidth = 1) +
+    scale_alpha_continuous(range = c(alphanum, 1)) +
+    xlab("Model Name") +
+    theme(legend.position="none", axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10))
+  
+  if (accuracy) {
+    fig <- fig + ylab(expression("Test F"[1]*"-Score")) + 
+      scale_y_continuous(limits = c(0,1))
+  } else {
+    fig <- fig + ylab("Fit Time (minutes, log scale)") + 
+      scale_y_continuous(trans = scales::log10_trans(), limits = c(0.001,90), labels = scales::label_number(accuracy = 0.01))
+  }
+  
+  if (!is.null(cutoff)) fig <- fig + geom_hline(yintercept=cutoff, linetype="dashed", linewidth = 1, alpha = 0.6)
+  
+  fig
+}
+
+# Figure S1. Plot model comparisons
+allModels = c("LR", "RR", "LDA", "QDA", "KNN", "DT", "RF", "ET", "GNB", "BNB", "NC", "PA", "Per", "MLP", "GB", "BC", "ABC")
+selectModels = c("ET","LDA", "LR", "PA", "Per")
+
+fitFiles <- list.files(path = here("./- Model Selection/"), pattern=glob2rx(("Fit*.csv")), full.names = TRUE)
+testFiles <- list.files(path = here("./- Model Selection/"), pattern=glob2rx(("Test*.csv")), full.names = TRUE)
+trainFiles <- list.files(path = here("./- Model Selection/"), pattern=glob2rx(("Train*.csv")), full.names = TRUE)
+
+plot_grid((plotModelComparison(getSelectionFile(fitFiles[1], TRUE), allModels, FALSE, 2) + theme(axis.title.x = element_blank())),
+          plotModelComparison(getSelectionFile(testFiles[1]), allModels, cutoff=0.8), ncol = 1, align = "v", axis = "lr") %>%
+  ggsave(filename = here("./- Figures/S1output..png"), width = 6, height = 8, units = "in", dpi = 500)
+
+# Table 2. Model tuning, test results
+testHier <- getSelectionFile(testFiles[4]) %>% mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+testHierAuto1 <- getSelectionFile(testFiles[5]) %>% mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+testHierAuto2 <- getSelectionFile(testFiles[7]) %>% mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+testHierAuto3 <- getSelectionFile(testFiles[8]) %>% mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+data.frame(getSelectionFile(testFiles[4])$model, testHier, testHierAuto1, testHierAuto2, testHierAuto3) %>% write.csv("./- Tables/Table 2.csv", row.names = F, fileEncoding="Windows-1252")
+
+# Table S3. Model tuning, fit time
+fitHier <- getSelectionFile(fitFiles[4], TRUE) %>% mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+fitHierAuto1 <- getSelectionFile(fitFiles[5], TRUE) %>% mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+fitHierAuto2 <- getSelectionFile(fitFiles[7], TRUE) %>% mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+fitHierAuto3 <- getSelectionFile(fitFiles[8], TRUE) %>% mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+data.frame(getSelectionFile(fitFiles[4])$model, fitHier, fitHierAuto1, fitHierAuto2, fitHierAuto3) %>% write.csv("./- Tables/Table S2.csv", row.names = F, fileEncoding="Windows-1252")
+
+```
+
+``` {r Model Evaluation — WT vs. SCN1a Training}
+formatAccuracy <- function(strain = 'WT', model = 1) {
+  overallDir <- list.files(path = here("./- Model Selection/Evaluation/"), 
+                           pattern=glob2rx(sprintf("%s*overall.csv", strain)), full.names = TRUE)[model]
+  scoresDir <- list.files(path = here("./- Model Selection/Evaluation/"), 
+                          pattern=glob2rx(sprintf("%s*scores.csv", strain)), full.names = TRUE)[model]
+  
+  overall <- read.csv(overallDir)$f1.score
+  overall <- paste0(round(mean(overall), 3), " (±", round(sd(overall) / sqrt(length(overall)), 3), ")")
+  
+  scores <- read.csv(scoresDir)
+  scores <- data.frame(mean = colMeans(scores), se = apply(scores, 2, function(x) sd(x) / sqrt(length(x))), row.names = NULL) %>%
+    mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+  
+  if (model == 1) {
+    scores <- append(scores, list(NA), after = 1)
+  }
+  
+  result <- c(overall, scores)
+  return(result)
+}
+
+WT_SCN1a <- matrix(unlist(c(formatAccuracy(strain = 'SCN1a'), 
+                            formatAccuracy(strain = 'SCN1a', model = 6), 
+                            formatAccuracy(strain = 'SCN1a', model = 5), 
+                            formatAccuracy(strain = 'SCN1a', model = 2), 
+                            formatAccuracy(strain = 'SCN1a', model = 4), 
+                            formatAccuracy(strain = 'SCN1a', model = 3))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/Table 3-1.csv", row.names = F, fileEncoding="Windows-1252")
+
+SCN1a_WT <- matrix(unlist(c(formatAccuracy(), 
+                            formatAccuracy(model = 6), 
+                            formatAccuracy(model = 5), 
+                            formatAccuracy(model = 2), 
+                            formatAccuracy(model = 4), 
+                            formatAccuracy(model = 3))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/Table 3-2.csv", row.names = F, fileEncoding="Windows-1252")
+```
+
+``` {r Model Evaluation — Other strains & lab data}
+# Other strains
+getStrainResult <- function(strain, electrode = 'frontal', twohours = FALSE) {
+  strain <- ifelse(twohours, paste0(strain,"+2h"), strain)
+  
+  result <- read.csv(paste0("./- Model Selection/Evaluation/", sprintf("%s/", electrode), sprintf("%s.csv", strain)))
+  result <- data.frame(mean = colMeans(result), se = apply(result, 2, function(x) sd(x) / sqrt(length(x))), row.names = NULL) %>%
+    mutate(result = paste0(round(mean, 3), "±", round(se, 3))) %>% pull(result)
+  
+  return(result)
+}
+
+Iglesia <- matrix(unlist(c(getStrainResult('APP-PS1'), 
+                            getStrainResult('NmsVgats'), 
+                            getStrainResult('TSE'), 
+                            getStrainResult('5sec'))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/Table 4-1.csv", row.names = F, fileEncoding="Windows-1252")
+
+Kalume <- matrix((getStrainResult('FK')), ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/Table 4-2.csv", row.names = F, fileEncoding="Windows-1252")
+
+Sippel <- matrix(unlist(c(getStrainResult('SippelWT'), 
+                            getStrainResult('SippelWT_4'), 
+                            getStrainResult('SippelKO'), 
+                            getStrainResult('SippelKO_4'),
+                            getStrainResult('SippelWT', electrode = 'parietal'), 
+                            getStrainResult('SippelWT_4', electrode = 'parietal'), 
+                            getStrainResult('SippelKO', electrode = 'parietal'), 
+                            getStrainResult('SippelKO_4', electrode = 'parietal'))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/Table 4-3.csv", row.names = F, fileEncoding="Windows-1252")
+
+Sippel3score <- matrix(unlist(c(  getStrainResult('SippelWT_3scores', electrode = 'parietal'), 
+                                  getStrainResult('SippelWT_4_3scores', electrode = 'parietal'), 
+                                  getStrainResult('SippelKO_3scores', electrode = 'parietal'), 
+                                  getStrainResult('SippelKO_4_3scores', electrode = 'parietal'))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/Table 4-3_3.csv", row.names = F, fileEncoding="Windows-1252")
+
+Ellen <- matrix(unlist(c(getStrainResult('Ellen1'), 
+                            getStrainResult('Ellen1_4'), 
+                            getStrainResult('Ellen2'), 
+                            getStrainResult('Ellen2_4'),
+                            getStrainResult('Ellen3'), 
+                            getStrainResult('Ellen3_4'),
+                            getStrainResult('Ellen1', electrode = 'parietal'), 
+                            getStrainResult('Ellen1_4', electrode = 'parietal'), 
+                            getStrainResult('Ellen2', electrode = 'parietal'), 
+                            getStrainResult('Ellen2_4', electrode = 'parietal'),
+                            getStrainResult('Ellen3', electrode = 'parietal'), 
+                            getStrainResult('Ellen3_4', electrode = 'parietal'))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/Table 4-4.csv", row.names = F, fileEncoding="Windows-1252")
+
+# Supplemental
+IglesiaSup <- matrix(unlist(c(getStrainResult('APP-PS1', twohours = TRUE), 
+                            getStrainResult('NmsVgats', twohours = TRUE), 
+                            getStrainResult('TSE', twohours = TRUE), 
+                            getStrainResult('5sec', twohours = TRUE))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/SupTable 4-1.csv", row.names = F, fileEncoding="Windows-1252")
+
+KalumeSup <- matrix((getStrainResult('FK', twohours = TRUE)), ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/SupTable 4-2.csv", row.names = F, fileEncoding="Windows-1252")
+
+SippelSup <- matrix(unlist(c(getStrainResult('SippelWT', twohours = TRUE), 
+                            getStrainResult('SippelWT_4', twohours = TRUE), 
+                            getStrainResult('SippelKO', twohours = TRUE), 
+                            getStrainResult('SippelKO_4', twohours = TRUE),
+                            getStrainResult('SippelWT', electrode = 'parietal', twohours = TRUE), 
+                            getStrainResult('SippelWT_4', electrode = 'parietal', twohours = TRUE), 
+                            getStrainResult('SippelKO', electrode = 'parietal', twohours = TRUE), 
+                            getStrainResult('SippelKO_4', electrode = 'parietal', twohours = TRUE))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/SupTable 4-3.csv", row.names = F, fileEncoding="Windows-1252")
+
+EllenSup <- matrix(unlist(c(getStrainResult('Ellen1', twohours = TRUE), 
+                            getStrainResult('Ellen1_4', twohours = TRUE), 
+                            getStrainResult('Ellen2', twohours = TRUE), 
+                            getStrainResult('Ellen2_4', twohours = TRUE),
+                            getStrainResult('Ellen3', twohours = TRUE), 
+                            getStrainResult('Ellen3_4', twohours = TRUE),
+                            getStrainResult('Ellen1', electrode = 'parietal', twohours = TRUE), 
+                            getStrainResult('Ellen1_4', electrode = 'parietal', twohours = TRUE), 
+                            getStrainResult('Ellen2', electrode = 'parietal', twohours = TRUE), 
+                            getStrainResult('Ellen2_4', electrode = 'parietal', twohours = TRUE),
+                            getStrainResult('Ellen3', electrode = 'parietal', twohours = TRUE), 
+                            getStrainResult('Ellen3_4', electrode = 'parietal', twohours = TRUE))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/SupTable 4-4.csv", row.names = F, fileEncoding="Windows-1252")
+
+EllenTraining <- matrix(unlist(c(getStrainResult('DIL_Ellen1'), 
+                                 getStrainResult('DIL_Ellen1_4'), 
+                                 getStrainResult('DIL_Ellen2'), 
+                                 getStrainResult('DIL_Ellen2_4'),
+                                 getStrainResult('DIL_Ellen3'), 
+                                 getStrainResult('DIL_Ellen3_4'),
+                                 getStrainResult('rat_Ellen1'), 
+                                 getStrainResult('rat_Ellen1_4'), 
+                                 getStrainResult('rat_Ellen2'), 
+                                 getStrainResult('rat_Ellen2_4'),
+                                 getStrainResult('rat_Ellen3'), 
+                                 getStrainResult('rat_Ellen3_4'))),
+                   ncol = 5, byrow = TRUE) %>% 
+  write.csv("./- Tables/SupTable 5.csv", row.names = F, fileEncoding="Windows-1252")
+```
+
+``` {r Sample Trace}
+plotTrace <- function(data, plotName, full=TRUE, startEpoch=0) {
+  if (full) {
+    data <- data[0:(120*60*fs-1),]
+    xbreaks <- seq(0, 119, by = 30)
+    width=12
+    xlab <- "Time elapsed (minutes)"
+    ecogscale <- 300
+    plotHeight <- 5.5
+  } else {
+    data <- data[(startEpoch*epoch*fs):((startEpoch+2)*epoch*fs-1),]
+    data$time <- (data$time - min(data$time))*60
+    xbreaks <- seq(0, 30, by = 10)
+    width=4
+    xlab <- "Time elapsed (seconds)"
+    ecogscale <- 200
+    plotHeight <- 4
+  }
+  
+  ecogPlot <- ggplot(data, aes(x=time)) + 
+    geom_line(aes(y = ecog)) +
+    theme_bw() +
+    theme(plot.margin = margin(0.01,0.01,0.05,0.01, "in"),
+          panel.background = element_rect('#fdfcff'),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in"),
+          axis.title.x=element_blank()) +
+    ggtitle("ECoG Signal") +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(-ecogscale, ecogscale, by = ecogscale), expand = c(0, 0), limits = c(-ecogscale, ecogscale)) +
+    ylab("mV")
+  
+  emgPlot <- ggplot(data, aes(x=time)) + 
+    geom_line(aes(y = emg)) +
+    theme_bw() +
+    theme(plot.margin = margin(0.01,0.01,0.05,0.01, "in"),
+          panel.background = element_rect('#fdfcff'),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in"),
+          axis.title.x=element_blank()) +
+    ggtitle("EMG Signal") +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(-200, 200, by = 200), expand = c(0, 0), limits = c(-200, 200)) +
+    ylab("mV")
+  
+  manualPlot <- ggplot(data, aes(x=time)) +
+    geom_vline(aes(xintercept = time,color = manual), size=0.05) +
+    theme(strip.text = element_blank(),
+          plot.margin = margin(0.01,0.01,0.05,0.01, "in"),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in"),
+          axis.text.y = element_blank(),
+          axis.title.x=element_blank(),
+          axis.title.y=element_blank()) + 
+    ggtitle("Manual Scores") +
+    scale_color_manual(values = c('WAKE'= '#f4d33e', 'NREM' = '#7b6e97', 'REM' = '#7ab5bf')) +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    guides(color = "none")
+  
+  siestaPlot <- ggplot(data, aes(x=time)) +
+    geom_vline(aes(xintercept = time,color = siesta), size=0.05) +
+    theme(plot.margin = margin(0.01,0.01,0.01,0.01, "in"),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in"),
+          axis.text.y = element_blank(),
+          axis.title.x=element_blank()) +
+    ggtitle("SIESTA Scores") +
+    scale_color_manual(values = c('WAKE'= '#f4d33e', 'NREM' = '#7b6e97', 'REM' = '#7ab5bf')) +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    guides(color = "none")
+  
+  probsPlot <- ggplot(data, aes(x=time)) +
+    geom_hline(yintercept=50, linetype="dashed", linewidth = 0.4, alpha = 0.6) +
+    geom_line(aes(y = WAKE),  color = '#f4d33e', size=0.7, alpha = 0.7) +
+    geom_line(aes(y = NREM),  color = '#7b6e97', size=0.7, alpha = 0.7) +
+    geom_line(aes(y = REM),   color = '#7ab5bf', size=0.7, alpha = 0.7) +
+    theme(plot.margin = margin(0.01,0.01,0.01,0.01, "in"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in")) +
+    ylab("prob.") +
+    xlab(xlab) +
+    ggtitle("SIESTA Stage Probability") +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(0, 100, by = 50), expand = c(0, 0), limits = c(0, 100)) +
+    guides(color = "none")
+  
+  plot <- ecogPlot/emgPlot/manualPlot/siestaPlot/probsPlot + plot_layout(ncol = 1, heights = c(1,0.5, 0.15, 0.15, 0.4))
+  
+  ggsave(plotName, plot = plot, width = width, height = plotHeight, units = "in", dpi = 500)
+}
+
+edf <- read.edf(".\\Data\\DLI\\- Figure, Sample\\sample trace.edf")
+
+epoch <- 10 #seconds
+fs <- edf$header.signal$EEG_EEG1A_B$samplingrate
+
+ecog <- edf$signal$EEG_EEG1A_B$data
+emg <- edf$signal$EEG_EMGA_B$data
+time <- edf$signal$EEG_EEG1A_B$t/60
+df <- data.frame(ecog, emg, time)
+
+manual <- read.csv(".\\Data\\DLI\\- Figure, Sample\\sample_scores.csv")
+siesta <- read.csv(".\\Data\\DLI\\- Figure, Sample\\sample_scores_siesta.csv")
+df["manual"] <- as.factor(manual[rep(1:nrow(manual), each = epoch*fs), ])
+df["siesta"] <- as.factor(siesta[rep(1:nrow(siesta), each = epoch*fs), ])
+
+probs <- read.csv(".\\Data\\DLI\\- Figure, Sample\\sample_probabilities_siesta.csv")*100
+probs$time <- seq(0, 299.999, by = 1/6)
+probs$run <- 0
+
+for (i in 2:nrow(probs)) {
+  if (is.na(probs$REM[i]) & is.na(probs$REM[i-1])) {
+    probs$run[i] <- probs$run[i-1] + 1
+  } else {
+    probs$run[i] <- probs$run[i]
+  }
+}
+
+probs <- left_join(data.frame(time = time), probs, by = "time") %>% subset(select = -time)
+probs[c("WAKE", "SLEEP", "NREM", "REM", "run")] <- lapply(probs[c("WAKE", "SLEEP", "NREM", "REM", "run")], function(y) {
+  na.approx(y, na.rm = FALSE, rule = 2)})
+probs$NREM[probs$run>=0.25] <- NA
+probs$REM[probs$run>=0.25] <- NA
+
+df <- data.frame(df, probs)
+rm(edf, ecog, emg, time, manual, siesta, probs)
+
+df <- df[-(1:(0.5*60*fs)),]
+df$time <- df$time - 0.5
+
+plotTrace(df, ".\\- Figures\\sample trace.tif")
+plotTrace(df, ".\\- Figures\\sample trace nrem.tif", FALSE, 159)
+plotTrace(df, ".\\- Figures\\sample trace rem.tif", FALSE, 332)
+plotTrace(df, ".\\- Figures\\sample trace wake.tif", FALSE, 464)
+```
+
+``` {r Sample Trace — substages}
+plotTrace <- function(data, plotName, full=TRUE, startEpoch=0) {
+  if (full) {
+    data <- data[0:(120*60*fs-1),]
+    xbreaks <- seq(0, 119, by = 30)
+    width=12
+    xlab <- "Time elapsed (minutes)"
+    ecogscale <- 300
+    plotHeight <- 5.5
+  } else {
+    data <- data[(startEpoch*epoch*fs):((startEpoch+2)*epoch*fs-1),]
+    data$time <- (data$time - min(data$time))*60
+    xbreaks <- seq(0, 30, by = 10)
+    width=4
+    xlab <- "Time elapsed (seconds)"
+    ecogscale <- 200
+    plotHeight <- 4
+  }
+  
+  ecogPlot <- ggplot(data, aes(x=time)) + 
+    geom_line(aes(y = ecog)) +
+    theme_bw() +
+    theme(plot.margin = margin(0.01,0.01,0.05,0.01, "in"),
+          panel.background = element_rect('#fdfcff'),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in"),
+          axis.title.x=element_blank()) +
+    ggtitle("ECoG Signal") +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(-ecogscale, ecogscale, by = ecogscale), expand = c(0, 0), limits = c(-ecogscale, ecogscale)) +
+    ylab("mV")
+  
+  emgPlot <- ggplot(data, aes(x=time)) + 
+    geom_line(aes(y = emg)) +
+    theme_bw() +
+    theme(plot.margin = margin(0.01,0.01,0.05,0.01, "in"),
+          panel.background = element_rect('#fdfcff'),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in"),
+          axis.title.x=element_blank()) +
+    ggtitle("EMG Signal") +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(-200, 200, by = 200), expand = c(0, 0), limits = c(-200, 200)) +
+    ylab("mV")
+  
+  manualPlot <- ggplot(data, aes(x=time)) +
+    geom_vline(aes(xintercept = time,color = manual), size=0.05) +
+    theme(strip.text = element_blank(),
+          plot.margin = margin(0.01,0.01,0.05,0.01, "in"),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in"),
+          axis.text.y = element_blank(),
+          axis.title.x=element_blank(),
+          axis.title.y=element_blank()) + 
+    ggtitle("Manual Scores") +
+    scale_color_manual(values = c('WAKE'= '#f4d33e', 'NREM' = '#7b6e97', 'REM' = '#7ab5bf')) +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    guides(color = "none")
+  
+  siestaPlot <- ggplot(data, aes(x=time)) +
+    geom_vline(aes(xintercept = time,color = siesta), size=0.05) +
+    theme(plot.margin = margin(0.01,0.01,0.01,0.01, "in"),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in"),
+          axis.text.y = element_blank(),
+          axis.title.x=element_blank()) +
+    ggtitle("SIESTA Scores") +
+    scale_color_manual(values = c('WAKE'= '#f4d33e', 'NREM' = '#7b6e97', 'N2' = '#38316b', 'REM' = '#7ab5bf', 'LIGHT' = '#b98f5a', 'TRANSITION' = '#5f97b4')) +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    guides(color = "none")
+  
+  probsPlot <- ggplot(data, aes(x=time)) +
+    geom_hline(yintercept=50, linetype="dashed", linewidth = 0.4, alpha = 0.6) +
+    geom_line(aes(y = WAKE),  color = '#f4d33e', size=0.7, alpha = 0.7) +
+    geom_line(aes(y = NREM),  color = '#7b6e97', size=0.7, alpha = 0.7) +
+    geom_line(aes(y = REM),   color = '#7ab5bf', size=0.7, alpha = 0.7) +
+    theme(plot.margin = margin(0.01,0.01,0.01,0.01, "in"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.ticks.x=element_line(size=1),
+          axis.ticks.y=element_line(size=1),
+          axis.ticks.length=unit(0.05,"in")) +
+    ylab("prob.") +
+    xlab(xlab) +
+    ggtitle("SIESTA Stage Probability") +
+    scale_x_continuous(breaks = xbreaks, expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(0, 100, by = 50), expand = c(0, 0), limits = c(0, 100)) +
+    guides(color = "none")
+  
+  plot <- ecogPlot/emgPlot/manualPlot/siestaPlot/probsPlot + plot_layout(ncol = 1, heights = c(1,0.5, 0.15, 0.15, 0.4))
+  
+  ggsave(plotName, plot = plot, width = width, height = plotHeight, units = "in", dpi = 500)
+}
+
+edf <- read.edf(".\\Data\\DLI\\- Figure, Sample\\sample trace.edf")
+
+epoch <- 10 #seconds
+fs <- edf$header.signal$EEG_EEG1A_B$samplingrate
+
+ecog <- edf$signal$EEG_EEG1A_B$data
+emg <- edf$signal$EEG_EMGA_B$data
+time <- edf$signal$EEG_EEG1A_B$t/60
+df <- data.frame(ecog, emg, time)
+
+manual <- read.csv(".\\Data\\DLI\\- Figure, Sample\\sample_scores.csv")
+siesta <- read.csv(".\\Data\\DLI\\- Figure, Sample\\sample_scores_siesta.csv")
+df["manual"] <- as.factor(manual[rep(1:nrow(manual), each = epoch*fs), ])
+df["siesta"] <- as.factor(siesta[rep(1:nrow(siesta), each = epoch*fs), ])
+
+probs <- read.csv(".\\Data\\DLI\\- Figure, Sample\\sample_probabilities_siesta.csv")*100
+probs$time <- seq(0, 299.999, by = 1/6)
+probs$run <- 0
+
+for (i in 2:nrow(probs)) {
+  if (is.na(probs$REM[i]) & is.na(probs$REM[i-1])) {
+    probs$run[i] <- probs$run[i-1] + 1
+  } else {
+    probs$run[i] <- probs$run[i]
+  }
+}
+
+probs <- left_join(data.frame(time = time), probs, by = "time") %>% subset(select = -time)
+probs[c("WAKE", "SLEEP", "NREM", "REM", "run")] <- lapply(probs[c("WAKE", "SLEEP", "NREM", "REM", "run")], function(y) {
+  na.approx(y, na.rm = FALSE, rule = 2)})
+probs$NREM[probs$run>=0.25] <- NA
+probs$REM[probs$run>=0.25] <- NA
+
+df <- data.frame(df, probs)
+rm(edf, ecog, emg, time, manual, siesta, probs)
+
+df <- df[-(1:(0.5*60*fs)),]
+df$time <- df$time - 0.5
+
+df$siesta <- as.character(df$siesta)
+df$siesta[df$SLEEP/100 >= .3 & df$REM/100   >= .25 ] <- 'REM'
+df$siesta[df$SLEEP/100 >= .6 & df$REM/100   <  .3  & df$REM/100 > .1] <- 'TRANSITION'
+df$siesta[df$SLEEP/100 >= .8 & df$REM/100   <= .1  ] <- 'NREM'
+df$siesta[df$SLEEP/100 >= .98 & df$REM/100   <= .01  ] <- 'N2'
+df$siesta[df$SLEEP/100 <  .8 & df$SLEEP/100 >  .2  ] <- 'LIGHT'
+df$siesta[df$SLEEP/100 <= .2] <- 'WAKE'
+df$siesta <- factor(df$siesta)
+
+plotTrace(df, ".\\- Figures\\sample trace_substages.tif")
+plotTrace(df, ".\\- Figures\\sample trace nrem.tif", FALSE, 159)
+plotTrace(df, ".\\- Figures\\sample trace rem.tif", FALSE, 332)
+plotTrace(df, ".\\- Figures\\sample trace wake.tif", FALSE, 464)
+```
+
+``` {r Correlation Matrix}
+if (!exists("X")) {
+  training <- read.csv(".\\Data\\training_noautocorr.csv")
+  X <- training[, 1:108]
+  score = training[,110]
+}
+
+clustered <- hclust(dist(cor(X)), method = "complete")
+clusteredIndex <- cutree(clustered, h = 0.5 * max(clustered$height))
+
+columns <- colnames(X)[order(clusteredIndex)]
+X <- X[, columns]
+
+corr <- melt(cor(X))
+corr$Var2 <- factor(corr$Var2, levels = rev(columns))
+
+corrPlot <- ggplot(corr, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "D", limits = c(-1, 1), name = expression(italic(r)~"coefficient")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_fixed() +
+  labs(title = "Correlation Matrix", x = "", y = "")
+
+ggsave(".\\- Figures\\Fig2.tif", plot = corrPlot, width = 15, height = 14, units = "in", dpi = 500)
+```
+
+``` {r Feature Selection}
+getFeatureFiles <- function(step = 'step1', direction = 'forward', autocorr = FALSE) {
+  if (autocorr) {step <- paste(step, "_autocorr", sep = "")}
+  files <- list.files(path = here("./- Model Selection/Feature Selection/"), 
+                      pattern=glob2rx(sprintf("%s_%s*", step, direction)), full.names = TRUE)
+  
+  return(files)
+}
+
+cleanFeatureFiles <- function(files) {
+  df <- data.frame() 
+  
+  for (i in 1:length(files)) {
+    data <- read.csv(files[i])
+    
+    featureOrder <- rep(0, nrow(data))
+    featureOrderNames <- rep(0, nrow(data))
+  
+    nums_clean <- str_split(gsub("[()]", "", data$feature_idx), ", ")
+    nums_clean[[1]] <- gsub(",", "", nums_clean[[1]])
+    names_clean <- str_split(gsub("[()]", "", data$feature_names), ", ")
+    names_clean[[1]] <- gsub(",", "", names_clean[[1]])
+    
+    for (j in (length(nums_clean)):2) {
+      featureOrder[j] <- setdiff(nums_clean[[j]], nums_clean[[j-1]])
+      featureOrderNames[j] <- setdiff(names_clean[[j]], names_clean[[j-1]])
+    }
+    
+    featureOrder[1] <- nums_clean[[1]]
+    featureOrderNames[1] <- names_clean[[1]]
+    
+    cvs <- data.frame(list_transpose(str_extract_all(data$cv_scores, '\\d+([.,]\\d+)?')))
+    names(cvs) <- c("cv1", "cv2", "cv3", "cv4", "cv5")
+    
+    cleanFeatures <- data.frame(run = i,
+                                position = data$X,
+                                featureNum = gsub("'", "", featureOrder),
+                                featureName = gsub("'", "", featureOrderNames),
+                                mean = data$avg_score*100,
+                                se = data$std_err*100,
+                                cvs
+                                )
+    
+    df <- rbind(df,cleanFeatures)
+  }
+  return(df)
+}
+
+plotSelection <- function(data, pos = 1) {
+  if (pos == 1) {
+    plottitle <- "Step 1"
+    xtitle <- element_blank()
+    ytitle <- element_text()
+  } else if (pos == 2) {
+    plottitle <- "Step 2"
+    xtitle <- element_text()
+    ytitle <- element_text()
+  } else if (pos == 3) {
+    plottitle <- "Step 1, + time-delayed features"
+    xtitle <- element_blank()
+    ytitle <- element_blank()
+  } else if (pos == 4) {
+    plottitle <- "Step 2, + time-delayed features"
+    xtitle <- element_text()
+    ytitle <- element_blank()
+  }
+  
+  result <- data %>% group_by(featureName) %>% summarise(weighted = sum(position) / 5) %>% 
+    arrange(weighted) %>% slice_head(n = 10)
+  
+  textypos <- seq(88, by = -1.4, length.out = 10)
+  
+  fig <- ggplot() + 
+    geom_line(data = data, aes(x = position, color = as.factor(run), y=mean), linewidth = 1.5, alpha = 0.85) + 
+    geom_ribbon(data = data, aes(x = position, y=mean, ymin=mean-se*1.96, ymax=mean+se*1.96, 
+                                 color = as.factor(run), fill = as.factor(run)), linewidth = 0.5, alpha=0.2) +
+    theme_bw() +
+    scale_x_continuous(breaks = c(1, 5, 10, 15), limits=c(1, 20), expand = c(0, 0)) +
+    scale_y_continuous(breaks = seq(80, 100, by = 10), limits=c(75, 100), expand = c(0, 0.5)) +
+    scale_colour_viridis_d() +
+    scale_fill_viridis_d() +
+    labs(title=plottitle, x = "Feature Number", y = "Accuracy (%)") +
+    theme(
+      plot.margin = margin(0.01,0.01,0.01,0.01, "in"),
+      panel.background = element_rect('#fdfcff'),
+      axis.ticks.x=element_line(linewidth=1),
+      axis.ticks.y=element_line(linewidth=1),
+      axis.ticks.length=unit(0.2,"in"),
+      axis.title.x=xtitle,
+      axis.title.y=ytitle,) + 
+    guides(color = "none", fill = "none") +
+    geom_text(data = result, aes(x = 9, y = textypos, label = featureName), hjust = 0, size=2)
+  
+  return(fig)
+}
+
+step1f <- plotSelection(cleanFeatureFiles(getFeatureFiles()))
+step2f <- plotSelection(cleanFeatureFiles(getFeatureFiles(step = 'step2')), pos = 2)
+autocorrstep1f <- plotSelection(cleanFeatureFiles(getFeatureFiles(autocorr = TRUE)), pos = 3)
+autocorrstep2f <- plotSelection(cleanFeatureFiles(getFeatureFiles(step = 'step2', autocorr = TRUE)), pos = 4)
+
+plot <- step1f + autocorrstep1f + step2f + autocorrstep2f + plot_layout(ncol = 2) + 
+  plot_annotation(tag_levels = 'A') &
+  theme(plot.tag = element_text(face = "bold", family = "Arial", size = 14))
+
+ggsave(".\\- Figures\\Fig4.tif", plot = plot, width = 6, height = 5, units = "in", dpi = 500)
+```
+
+``` {r LDA}
+if (!exists("X_autocorr")) {
+  training_autocorr <- read.csv(".\\Data\\training_autocorr3.csv")
+  X_autocorr <- training_autocorr[, 1:432]
+  score_autocorr = training_autocorr[,434]
+}
+
+ldaData <- X_autocorr
+ldaData$score <- score_autocorr
+
+lda_model <- lda(score ~ ., data = ldaData)
+
+lda_values <- as.data.frame(predict(lda_model)$x)
+lda_values$score <- score_autocorr
+
+LDAPlot <- ggplot(lda_values, aes(x = LD1, y = LD2, color = score)) +
+  theme_bw() +
+  geom_point(alpha = 0.7) +
+  theme(strip.text = element_blank(),
+        plot.margin = margin(0.00,0.00,0.00,0.00, "in"),
+        axis.ticks.x=element_line(size=1),
+        axis.ticks.y=element_line(size=1),
+        axis.ticks.length=unit(0.05,"in")) + 
+  labs(x = "Discriminant 1 (LD1)", y = "Discriminant 2 (LD2)") +
+  scale_color_manual(values = c('WAKE'= '#f4d33e', 'NREM' = '#7b6e97', 'REM' = '#7ab5bf')) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  guides(color = "none")
+
+ggsave(".\\- Figures\\FigS2-1.png", plot = LDAPlot, width = 8, height = 7, units = "in", dpi = 500)
+
+
+# With sub-stages
+probs <- read.csv(".\\Data\\training_autocorr3_probs.csv")
+subscores <- vector(mode = 'character', length = nrow(probs))
+
+subscores[probs$REM   >= .3 ] <- 'REM'
+subscores[probs$SLEEP >= .6 & probs$REM   <  .3  & probs$REM > .1] <- 'TRANSITION'
+subscores[probs$SLEEP >= .8 & probs$REM   <= .1  ] <- 'NREM'
+subscores[probs$SLEEP <  .8 & probs$SLEEP >  .2  ] <- 'LIGHT'
+subscores[probs$SLEEP <= .2] <- 'WAKE'
+probs[,5] = subscores
+
+lda_values$subscores <- subscores
+
+LDAPlotsub <- ggplot(lda_values, aes(x = LD1, y = LD2, color = subscores)) +
+  theme_bw() +
+  geom_point(alpha = 0.7) +
+  theme(strip.text = element_blank(),
+        plot.margin = margin(0.00,0.00,0.00,0.00, "in"),
+        axis.ticks.x=element_line(size=1),
+        axis.ticks.y=element_line(size=1),
+        axis.ticks.length=unit(0.05,"in")) + 
+  labs(x = "Discriminant 1 (LD1)", y = "Discriminant 2 (LD2)") +
+  scale_color_manual(values = c('WAKE'= '#f4d33e', 'NREM' = '#7b6e97', 'REM' = '#7ab5bf', 'LIGHT' = '#b98f5a', 'TRANSITION' = '#4a748b')) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  guides(color = "none")
+
+ggsave(".\\- Figures\\FigS2-3.png", plot = LDAPlotsub, width = 8, height = 7, units = "in", dpi = 500)
+
+lda_values$score <- factor(lda_values$score, levels = c("WAKE", "NREM", "REM"))  # Extra levels
+lda_values$subscores <- factor(lda_values$subscores, levels = c("WAKE", "NREM", "REM", "LIGHT", "TRANSITION"))  # Extra levels
+conf_matrix <- table(Predicted = lda_values$score, Reference = lda_values$subscores)
+conf_matrix_percent <- prop.table(conf_matrix, margin = 1) * 100
+```
+
+``` {r Rat vs. Mouse Power Spectra}
+plotDiff <- function(stage, electrode) {
+  if (electrode == 'ecog') {
+    ylims <- c(0, .4)
+  } else {
+    ylims <- c(0, .1)
+    ytitle <- element_text()
+  } 
+  
+  data <- read.csv(sprintf(".\\- Model Selection\\rat vs. mouse\\%s_%s.csv", stage, electrode))
+  
+  diffPlot <- ggplot(data, aes(x=freq, y=pxx, color = species)) +
+    geom_line(linewidth=2, alpha = 0.7) +
+    theme_bw() +
+    theme(plot.margin = margin(0.01,0.01,0.01,0.01, "in"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.ticks.x=element_line(linewidth=1),
+          axis.ticks.y=element_line(linewidth=1),
+          axis.ticks.length=unit(0.05,"in")) +
+    xlab("Frequency") +
+    ylab("Normalized PSD") +
+    scale_color_manual(values = c("rat" = "#b84646", "mouse (DLI)" = "#84c4f0", "mouse (Sippel)" = "#334680")) +
+    scale_x_continuous(expand = c(0, 0), limits = c(0, 62)) +
+    scale_y_continuous(breaks = c(0, 0.1, 0.2, 0.3, 0.4), expand = c(0, 0), limits = ylims) +
+    guides(color = "none")
+  
+  return(diffPlot)
+}
+
+WAKEecog <- plotDiff('WAKE', 'ecog')
+NREMecog <- plotDiff('NREM', 'ecog')
+REMecog <- plotDiff('REM', 'ecog')
+
+WAKEemg <- plotDiff('WAKE', 'emg')
+NREMemg <- plotDiff('NREM', 'emg')
+REMemg <- plotDiff('REM', 'emg')
+
+fullPlot <- WAKEecog/WAKEemg/NREMecog/NREMemg/REMecog/REMemg + 
+  plot_layout(ncol = 2) + 
+  plot_annotation(tag_levels = 'A') &
+  theme(plot.tag = element_text(face = "bold", family = "Arial", size = 14))
+
+ggsave(".\\- Figures\\SFig2.tif", plot = fullPlot, width = 5, height = 8, units = "in", dpi = 500)
+```
+
+``` {r Transition Matrix}
+if (!exists("score_autocorr")) {
+  score_autocorr = read.csv(".\\Data\\training_autocorr3.csv")[,434]
+}
+
+if (!exists("probs")) {
+  probs <- read.csv(".\\Data\\training_autocorr3_probs.csv")
+}
+subscores <- vector(mode = 'character', length = nrow(probs))
+subscores[probs$SLEEP >= .3 & probs$REM   >= .25 ] <- 'REM'
+subscores[probs$SLEEP >= .6 & probs$REM   <  .3  & probs$REM > .1] <- 'TRANSITION'
+subscores[probs$SLEEP >= .8 & probs$REM   <= .1  ] <- 'NREM'
+subscores[probs$SLEEP >= .98 & probs$REM   <= .01  ] <- 'N2'
+subscores[probs$SLEEP <  .8 & probs$SLEEP >  .2  ] <- 'LIGHT'
+subscores[probs$SLEEP <= .2] <- 'WAKE'
+
+# Make transition tables
+score_autocorr <- factor(score_autocorr, levels = c("WAKE", "REM", "NREM"))
+score_tran <- data.frame(t1 = head(score_autocorr, -1), t2 = tail(score_autocorr, -1))
+
+subscores <- factor(subscores, levels = c("WAKE", "LIGHT", "REM", "TRANSITION", "NREM", "N2"))
+subscore_tran <- data.frame(t1 = head(subscores, -1), t2 = tail(subscores, -1))
+
+rm(probs, score_autocorr, subscores)
+
+# Transition Matrix Function
+getTransitionMatrix <- function(data) {
+  result <- data.frame(from = character(), to = character(), est_p = numeric(), se = numeric(),stringsAsFactors = FALSE)
+  
+  for (state in unique(data$t1)) {
+    trans_counts <- table(data$t2[data$t1 == state])
+    trans_probs <- trans_counts / sum(trans_counts) 
+    
+    se_values <- sqrt((trans_probs * (1 - trans_probs)) / sum(trans_counts) )
+    
+    temp_result <- data.frame(
+      from = state,
+      to = names(trans_probs),
+      est_p = as.numeric(trans_probs),
+      se = as.numeric(se_values),
+      stringsAsFactors = FALSE
+    )
+    
+    result <- rbind(result, temp_result)
+  }
+  
+  result$result <- paste0(round(result$est_p, 3), "±", round(result$se, 3))
+  
+  return(result)
+}
+
+getTransitionMatrix(score_tran) %>% write.csv(".\\- Figures\\3score matrix.csv", row.names = F, fileEncoding="Windows-1252")
+getTransitionMatrix(subscore_tran) %>% write.csv(".\\- Figures\\6score matrix.csv", row.names = F, fileEncoding="Windows-1252")
+```
+
+``` {r Dendrogram}
+if (!exists("X")) {
+  training <- read.csv(".\\Data\\training_noautocorr.csv")
+  X <- training[, 1:108]
+  score = training[,110]
+}
+
+clustered <- hclust(dist(cor(X)), method = "complete")
+
+dendro <- dendro_data(as.dendrogram(clustered), type = "rectangle")
+
+dendro$segments$cluster <- NA
+dendro$segments$cluster[dendro$segments$x >= 1 & dendro$segments$x <= 28 & dendro$segments$y < 5] <- "4"
+dendro$segments$cluster[dendro$segments$x >= 29 & dendro$segments$x <= 44 & dendro$segments$y < 5] <- "3"
+dendro$segments$cluster[dendro$segments$x >= 45 & dendro$segments$x <= 81 & dendro$segments$y < 5] <- "2"
+dendro$segments$cluster[dendro$segments$x >= 82 & dendro$segments$x <= 108 & dendro$segments$y < 5] <- "1"
+
+dendrogramPlot <- ggplot() +
+  geom_segment(data = segment(dendro), aes(x = x, y = y, xend = xend, yend = yend, color = cluster), size = 1.3) +
+  geom_text(data = label(dendro), aes(x = x, y = y, label = label, hjust = 1), size = 3) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.margin = margin(0, 0, 0, 0, "in"),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        legend.position = c(0.95, 0.97),
+        legend.justification = c("right", "top"),
+        legend.box.just = "right",
+        legend.background = element_blank(),
+        legend.box.background = element_rect(colour = "black"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  scale_color_manual(values = c("1" = "#b84646", "2" = "#84c4f0", "3" = "#55bd81", "4" = "#e0b23b"), na.value = "#323047",  
+                     limits = c("1", "2", "3", "4"), name = "Cluster") +
+  xlab("Feature Label") +
+  ylab("Height") +
+  coord_flip() +
+  scale_x_continuous(expand = c(0.01, 0)) +
+  scale_y_continuous(breaks = seq(0, 6, by = 2), expand = c(0, 0), limits = c(-5.6, 9))
+
+ggsave(".\\- Figures\\FigS3.tif", plot = dendrogramPlot, width = 4.5, height = 12, units = "in", dpi = 500)
+```
+
+``` {r Hypnogram}
+heaviside <- function(data) {
+  data <- ifelse(data < mean(data), 0, 1)
+  
+  correlation_values <- c()
+  psi_values <- c()
+  n <- length(data)
+  
+  for (psi in 0:n) {
+    corr <- cor(data, ifelse(1:n < psi, 0, 1))
+    if (!is.na(corr) && !is.nan(corr)) {
+      corr <- corr * ((n - psi) / n)^(1/3)
+      
+      correlation_values <- c(correlation_values, corr)
+      psi_values <- c(psi_values, psi)
+    }
+  }
+  
+  return(data.frame(psi = psi_values, corr = correlation_values))
+}
+
+getOnsets <- function(data) {
+  onsets <- data.frame()
+  for (day in unique(data$Day)) {
+    print(day)
+    dataDay <- data[data$Day==day,]
+    
+    if(all(dataDay$WAKE == 0)) {
+      next
+    }
+    
+    output <- heaviside(dataDay$WAKE) %>% top_n(1, corr)
+    onsets <- rbind(onsets, dataDay[output$psi,])
+  }
+  
+  return(onsets)
+}
+
+getAcrophase <- function(data) {
+  compute_acrophase <- function(df) {
+    fit <- cosinor.lm(REM ~ time(Min), period = 24, data = df)
+    acrophase <- correct.acrophase(fit)  # Extract acrophase
+    return(data.frame(acrophase = acrophase))
+  }
+  
+  acrophase_results <- data %>%
+    group_by(Day) %>%
+    group_modify(~ compute_acrophase(.x))
+  acrophase_results["hour"] <- (abs(acrophase_results$acrophase) * 24) / (2 * pi)
+  acrophase_results <- acrophase_results %>% mutate(hour = ifelse(hour < 12, hour + 24, hour))
+  
+  return(acrophase_results)
+}
+
+getSleepFiles <- function(file, dataMin, REMperc) { 
+  sleep <- read.csv(file)
+  
+  names(sleep)[1] <- "sleep_score"
+  sleep$Timestamps <- round_date(as.POSIXct(sleep$Timestamps, format = "%Y-%m-%d %H:%M:%S"), unit = "10 seconds") 
+  sleep$sleep_score <- factor(sleep$sleep_score, levels = c("NREM", "REM", "WAKE")) #Turns sleep score into factor
+  
+  sleep <- sleep %>%
+    mutate(Timestamps = round_date(Timestamps, paste0(dataMin, 'minutes', sep=' '))) %>%
+    group_by(Timestamps) %>%
+    summarise(rem_percentage = sum(sleep_score == "REM") / n(),
+              sleep_score = names(which.max(table(sleep_score)))) %>%
+    mutate(sleep_score = ifelse(rem_percentage >= REMperc, "REM", sleep_score))
+  
+  return(sleep)
+}
+
+getSleep <- function(dir, REMperc){
+  sleepData <- data.frame()
+  sleepFiles <- list.files(file.path(dir), 
+                           pattern = paste0(".*SIESTA*\\.csv$"), full.names = TRUE)
+  for (file in sleepFiles) {
+    newData <- getSleepFiles(file, 6, REMperc)
+    newData$Day <- yday(newData$Timestamps)
+    newData$Min <- hour(newData$Timestamps) + minute(newData$Timestamps) / 60
+    newData$Day <- ifelse((newData$Min - 8) < 0, newData$Day - 1, newData$Day)
+    newData$Min = (newData$Min - 8) %% 24
+    
+    sleepData <- rbind(sleepData, newData)
+  }
+  sleepData <- sleepData %>%
+    distinct(Timestamps, .keep_all = TRUE)
+  return(sleepData)
+}
+
+getCircadian <- function(dir){
+  sleepProbFiles <- list.files(file.path(dir), pattern = paste0(".*probs*\\.csv$"), full.names = TRUE)
+  sleepProbs <- data.frame()
+  for (file in sleepProbFiles) {
+    newData <- read.csv(file)
+    
+    newData$REM[newData$SLEEP < .5 ] <- 0
+    newData <- newData[c("REM", "WAKE", "Timestamps")]
+    
+    newData$Day <- yday(newData$Timestamps)
+    newData$Min <- hour(newData$Timestamps) + minute(newData$Timestamps) / 60 + second(newData$Timestamps) / 3600
+    newData$Day <- ifelse((newData$Min - 8) < 0, newData$Day - 1, newData$Day)
+    newData$Min = (newData$Min - 8) %% 24
+    
+    sleepProbs <- rbind(sleepProbs, newData)
+  }
+  sleepProbs$Day <- sleepProbs$Day - (min(sleepProbs$Day)-1)
+  
+  onsets <- getOnsets(sleepProbs)
+  acrophase <- getAcrophase(sleepProbs)
+  
+  circadian <- merge(onsets, acrophase, by = "Day")[c("Day", "Min", "hour")]
+  names(circadian) <- c("Day", "onset", "acrophase")
+  
+  return(circadian)
+}
+
+plotHypnogram <- function(data, circadianData, double=TRUE, mouse='Het M', plotTitle) {
+  if (double) {
+    data_2 <- data[data$Day>(min(data$Day)),]
+    data_2$Day <- data_2$Day - 1
+    data_2$Min <- data_2$Min + 24
+    data <- rbind(data, data_2)
+  }
+  
+  data$Day <- data$Day - (min(data$Day)-1)
+  data <- data[data$Day < max(data$Day)-2,]
+  data$sleep_score <- factor(data$sleep_score, levels = c("REM", "NREM", "WAKE"))
+  
+  circadianData <- circadianData[circadianData$Day < max(circadianData$Day)-2,]
+  
+  fig <- ggplot() +
+    annotate("rect", xmin = 0, xmax = 48, ymin = -Inf, ymax = Inf, fill = "#faf1de", alpha=0.85) +
+    theme(
+      plot.margin = margin(0.00,0.00,0.00,0.00, "in"),
+      panel.background = element_rect('#fdfcff'),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank())
+  
+  if (mouse == 'Het M') {
+    fig <- fig +
+      geom_rect(data = data[data$Day < 5 | data$Day > 15,], 
+                aes(xmin = 12, xmax = 24, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day < 4 | data$Day > 14,], 
+                aes(xmin = 36, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      
+      geom_rect(data = data[data$Day >= 5 & data$Day < 16,], 
+                aes(xmin = 6, xmax = 18, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day >= 4 & data$Day < 15,], 
+                aes(xmin = 30, xmax = 42, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85)
+  } else if (mouse == 'Het B') {
+    fig <- fig +
+      geom_rect(data = data[data$Day < 7,], 
+                aes(xmin = 12, xmax = 24, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day < 6,], 
+                aes(xmin = 36, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      
+      geom_rect(data = data[data$Day >= 7,], 
+                aes(xmin = 0, xmax = 48, ymin  = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day == 6,], 
+                aes(xmin = 24, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85)
+  } else if (mouse == 'Het J') {
+    fig <- fig +
+      geom_rect(data = data[data$Day < 14,], 
+                aes(xmin = 0, xmax = 6, ymin  = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day < 14,], 
+                aes(xmin = 18, xmax = 30, ymin  = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day < 13,], 
+                aes(xmin = 42, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+    
+      geom_rect(data = data[data$Day >= 14,], 
+                aes(xmin = 12, xmax = 24, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day >= 13,], 
+                aes(xmin = 36, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) 
+  }
+  
+  data <- data %>%
+    mutate(DayIndex = as.numeric(factor(Day)))
+  
+  day_labels <- function(breaks) {
+    labels <- ifelse(breaks %% 5 == 1, breaks, "")
+    return(labels)
+  }
+  
+  fig <- fig +
+    geom_step(data = data, aes(x = Min, y = as.numeric(sleep_score), colour = as.numeric(sleep_score)), size = 1.2) +
+    facet_wrap(~ Day, ncol = 1, strip.position = "left") +  # Facet by day in separate rows
+    theme_bw() +
+      theme(plot.title = element_text(hjust = 0.5),
+          strip.text.y.left = element_text(angle = 0),
+          strip.background = element_rect(fill='transparent', color=NA, size = 0),
+          panel.spacing = unit(0, 'lines'),
+          panel.border = element_blank(),
+          plot.margin = margin(0, 0, 0, 0, "in"),
+          axis.ticks.x = element_line(linewidth = 1),
+          axis.ticks.y = element_blank(),
+          axis.ticks.length=unit(0.1,"in"),
+          axis.text.y = element_blank()) +
+    xlab("Time (Hour)") +
+    ylab("Day") +
+    ggtitle(plotTitle) +
+    scale_colour_gradientn(colors = c("#7ab5bf", "#7b6e97", "#f4d33e")) +
+    scale_x_continuous(breaks = seq(0, 47, by = 12), expand = c(0, 0)) +
+    guides(colour = "none")
+  
+  fig <- fig +
+    geom_point(data = circadianData, aes(x = onset, y = 2), shape = 16, size = 3.5, color = 'darkgreen', alpha = 0.65) +
+    geom_point(data = circadianData, aes(x = acrophase, y = 2), shape = 16, size = 3.5, color = 'darkred', alpha = 0.65) +
+    facet_wrap(~ Day, ncol = 1, strip.position = "left")
+
+  fig
+}
+
+sleepData <- getSleep(paste(".\\Data\\DLI\\- Figure, Jetlag\\Het M\\SIESTA", sep = ""), 0.4)
+circadian <- getCircadian(paste(".\\Data\\DLI\\- Figure, Jetlag\\Het M\\probs", sep = ""))
+advancePlot <- plotHypnogram(sleepData, circadian, plotTitle = 'Jet-lag - Advance')
+ggsave(".\\- Figures\\Advance SIESTA.tiff", plot = advancePlot, width = 5, height = 9, units = "in", dpi = 1000)
+
+sleepData <- getSleep(paste(getwd(), ".\\Data\\DLI\\- Figure, Jetlag\\Het J\\SIESTA", sep = ""), 0.4)
+circadian <- getCircadian(paste(".\\Data\\DLI\\- Figure, Jetlag\\Het J\\probs", sep = ""))
+delayPlot <- plotHypnogram(sleepData, circadian, mouse='Het J', plotTitle = 'Jet-lag - Delay')
+ggsave(".\\- Figures\\Delay SIESTA.tiff", plot = delayPlot, width = 5, height = 9, units = "in", dpi = 1000)
+
+sleepData <- getSleep(paste(getwd(), ".\\Data\\DLI\\- Figure, Jetlag\\Het B\\SIESTA", sep = ""), 0.2)
+circadian <- getCircadian(paste(".\\Data\\DLI\\- Figure, Jetlag\\Het B\\probs", sep = ""))
+DDPlot <- plotHypnogram(sleepData, circadian, mouse='Het B', plotTitle = 'Constant Darkness')
+ggsave(".\\- Figures\\DD SIESTA.tiff", plot = DDPlot, width = 5, height = 9, units = "in", dpi = 1000)
+```
+
+``` {r Hypnogram - Probabilities}
+getSleepFilesProbs <- function(file, dataMin, REMperc) { 
+  sleep <- read.csv(file)
+  
+  sleep$siesta[sleep$SLEEP >= .3 & sleep$REM   >= .25 ] <- 'REM'
+  sleep$siesta[sleep$SLEEP >= .6 & sleep$REM   <  .3  & sleep$REM > .1] <- 'TRANSITION'
+  sleep$siesta[sleep$SLEEP >= .8 & sleep$REM   <= .1  ] <- 'NREM'
+  sleep$siesta[sleep$SLEEP <  .8 & sleep$SLEEP >  .2  ] <- 'LIGHT'
+  sleep$siesta[sleep$SLEEP <= .2] <- 'WAKE'
+  
+  names(sleep)[6] <- "sleep_score"
+  sleep$Timestamps <- round_date(as.POSIXct(sleep$Timestamps, format = "%Y-%m-%d %H:%M:%S"), unit = "10 seconds") 
+  sleep$sleep_score <- factor(sleep$sleep_score, levels = c("NREM", "REM", "WAKE", "TRANSITION", "LIGHT")) #Turns sleep score into factor
+  
+  sleep <- sleep %>%
+    mutate(Timestamps = round_date(Timestamps, paste0(dataMin, 'minutes', sep=' '))) %>%
+    group_by(Timestamps) %>%
+    summarise(rem_percentage = sum(sleep_score == "REM") / n(),
+              trans_percentage = sum(sleep_score == "TRANSITION") / n(),
+              sleep_score = names(which.max(table(sleep_score)))) %>%
+    mutate(sleep_score = ifelse(rem_percentage >= REMperc, "REM", sleep_score),
+           sleep_score = ifelse(trans_percentage >= 0.1, "TRANSITION", sleep_score))
+  
+  return(sleep)
+}
+
+getSleepProbs <- function(dir, REMperc){
+  sleepData <- data.frame()
+  sleepFiles <- list.files(file.path(dir), 
+                           pattern = paste0(".*probs*\\.csv$"), full.names = TRUE)
+  for (file in sleepFiles) {
+    newData <- getSleepFilesProbs(file, 15, REMperc)
+    newData$Day <- yday(newData$Timestamps)
+    newData$Min <- hour(newData$Timestamps) + minute(newData$Timestamps) / 60
+    newData$Day <- ifelse((newData$Min - 8) < 0, newData$Day - 1, newData$Day)
+    newData$Min = (newData$Min - 8) %% 24
+    
+    sleepData <- rbind(sleepData, newData)
+  }
+  sleepData <- sleepData %>%
+    distinct(Timestamps, .keep_all = TRUE)
+}
+
+plotHypnogramProbs <- function(data, double=TRUE, mouse='Het M', plotTitle) {
+  if (double) {
+    data_2 <- data[data$Day>(min(data$Day)),]
+    data_2$Day <- data_2$Day - 1
+    data_2$Min <- data_2$Min + 24
+    data <- rbind(data, data_2)
+  }
+  
+  data$Day <- data$Day - (min(data$Day)-1)
+  data <- data[data$Day < max(data$Day)-2,]
+  data$sleep_score <- factor(data$sleep_score, levels = c("NREM", "TRANSITION", "REM", "LIGHT", "WAKE"))
+  
+  fig <- ggplot() +
+    annotate("rect", xmin = 0, xmax = 48, ymin = -Inf, ymax = Inf, fill = "#faf1de", alpha=0.85) +
+    theme(
+      plot.margin = margin(0.00,0.00,0.00,0.00, "in"),
+      panel.background = element_rect('#fdfcff'),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank())
+  
+  if (mouse == 'Het M') {
+    fig <- fig +
+      geom_rect(data = data[data$Day < 5 | data$Day > 15,], 
+                aes(xmin = 12, xmax = 24, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day < 4 | data$Day > 14,], 
+                aes(xmin = 36, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      
+      geom_rect(data = data[data$Day >= 5 & data$Day < 16,], 
+                aes(xmin = 6, xmax = 18, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day >= 4 & data$Day < 15,], 
+                aes(xmin = 30, xmax = 42, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85)
+  } else if (mouse == 'Het B') {
+    fig <- fig +
+      geom_rect(data = data[data$Day < 7,], 
+                aes(xmin = 12, xmax = 24, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day < 6,], 
+                aes(xmin = 36, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      
+      geom_rect(data = data[data$Day >= 7,], 
+                aes(xmin = 0, xmax = 48, ymin  = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day == 6,], 
+                aes(xmin = 24, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85)
+  } else if (mouse == 'Het J') {
+    fig <- fig +
+      geom_rect(data = data[data$Day < 14,], 
+                aes(xmin = 0, xmax = 6, ymin  = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day < 14,], 
+                aes(xmin = 18, xmax = 30, ymin  = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day < 13,], 
+                aes(xmin = 42, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+    
+      geom_rect(data = data[data$Day >= 14,], 
+                aes(xmin = 12, xmax = 24, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) +
+      geom_rect(data = data[data$Day >= 13,], 
+                aes(xmin = 36, xmax = 48, ymin = -Inf, ymax = Inf), fill = "#BBBBBB", alpha = 0.85) 
+  }
+  
+  
+  data <- data %>%
+    mutate(DayIndex = as.numeric(factor(Day)))
+  
+  day_labels <- function(breaks) {
+    labels <- ifelse(breaks %% 5 == 1, breaks, "")
+    return(labels)
+  }
+  
+  fig <- fig +
+    geom_step(data = data, aes(x = Min, y = as.numeric(sleep_score), colour = as.numeric(sleep_score)), size = 1.2) +
+    facet_wrap(~ Day, ncol = 1, strip.position = "left") +  # Facet by day in separate rows
+    theme_bw() +
+      theme(plot.title = element_text(hjust = 0.5),
+          strip.text.y.left = element_text(angle = 0),
+          strip.background = element_rect(fill='transparent', color=NA, size = 0),
+          panel.spacing = unit(0, 'lines'),
+          panel.border = element_blank(),
+          plot.margin = margin(0, 0, 0, 0, "in"),
+          axis.ticks.x = element_line(linewidth = 1),
+          axis.ticks.y = element_blank(),
+          axis.ticks.length=unit(0.1,"in"),
+          axis.text.y = element_blank()) +
+    xlab("Time (Hour)") +
+    ylab("Day") +
+    ggtitle(plotTitle) +
+    scale_colour_gradientn(colors = c("#7b6e97", '#5f97b4', "#7ab5bf", '#b98f5a', "#f4d33e")) +
+    scale_x_continuous(breaks = seq(0, 47, by = 12), expand = c(0, 0)) +
+    guides(colour = "none")
+  
+  fig
+}
+
+sleepData <- getSleep(paste(".\\Data\\DLI\\- Figure, Jetlag\\Het M\\probs", sep = ""), 0.4)
+advancePlot <- plotHypnogram(sleepData, plotTitle = 'Jet-lag - Advance')
+ggsave(".\\- Figures\\Advance SIESTA.tiff", plot = advancePlot, width = 5, height = 9, units = "in", dpi = 1000)
+
+sleepData <- getSleep(paste(getwd(), ".\\Data\\DLI\\- Figure, Jetlag\\Het J\\probs", sep = ""), 0.4)
+delayPlot <- plotHypnogram(sleepData, mouse='Het J', plotTitle = 'Jet-lag - Delay')
+ggsave(".\\- Figures\\Delay SIESTA.tiff", plot = delayPlot, width = 5, height = 9, units = "in", dpi = 1000)
+
+sleepData <- getSleepProbs(paste(getwd(), ".\\Data\\DLI\\- Figure, Jetlag\\Het B\\probs", sep = ""), 0.2)
+DDPlot <- plotHypnogramProbs(sleepData, mouse='Het B', plotTitle = 'Constant Darkness')
+ggsave(".\\- Figures\\DD SIESTA_probs.tiff", plot = DDPlot, width = 5, height = 9, units = "in", dpi = 1000)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+sleepData <- data.frame()
+sleepFiles <- list.files(file.path(".\\Data\\DLI\\- Figure, Jetlag\\Het M\\probs"), pattern = paste0(".*probs*\\.csv$"), full.names = TRUE)
+
+
+
+data <- sleepData
+
+
+
+```

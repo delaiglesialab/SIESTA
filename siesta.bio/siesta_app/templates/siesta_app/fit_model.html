@@ -1,0 +1,352 @@
+{% block page_meta %}
+	<title>SIESTA: Fit New Model</title>
+	<meta name="title" content="Fit Model">
+{% endblock %}
+
+{% block content %}
+	<div>
+	<h2>Fit New Model</h2>
+		<p>This page will fit a new model. You only need to fit a new model if you wish to use different parameters (e.g., different epoch length) or create a new model using your data and scored sleep stages. Otherwise, you can use the <a href={% url 'score_data' %}>pre-trained model</a>.</p>
+		<p>If you wish to use new training data, first <a href={% url 'extract_features' %}>extract features from your data</a>, and then add the scores to the final column of this file.</p>
+		<p>You can use as many files as you like to train the new model. Note that the more data used, the longer model training will take (this difference may be negligible.)</p>
+		<p>You must include data, either the SIESTA training data or your own data, in order to train the new model. A .file containing the trained model will be automatically downloaded when completed.</p>
+	</div>
+
+	<div>
+	<h3>File Upload</h3>
+    <div id="fit-drop-zone" class="drop-zone">
+        <p>Drag & drop files here or click to upload</p>
+        <input type="file" id="fit-file-input" accept='.csv' multiple style="display: none;">
+        <ul id='fit-file-list' class="file-list"></ul>
+    </div>
+	</div>
+
+	<form id="fit-model-form" method="POST" enctype="multipart/form-data" action="/fit-model/">
+	  {% csrf_token %}
+	  <div>
+	  <h3>Model Options</h3>
+		<table>
+            <tr>
+              <td>
+                <label>Choose training data source:</label><br>
+                <input type="radio" id="1chan" name="training_data_option" value="1">
+                <label for="1chan">1 Channel</label>
+                &nbsp;&nbsp;&nbsp;
+                <input type="radio" id="2chan" name="training_data_option" value="2">
+                <label for="2chan">2 Channels</label>
+              </td>
+              <td>
+                <div>Select one of the two training data sources if desired.</div>
+                <div>Leaving both unchecked will exclude training data.</div>
+              </td>
+            </tr>
+		  <tr>
+			<td>
+			  <label for="cache_model">Save new model?</label>
+			  <input type="checkbox" id="cache_model" name="cache_new_model">
+			</td>
+			<td>
+			  <div>Check this box if you wish to immediately use this model for scoring data.</div>
+			</td>
+		  </tr>
+		</table>
+	  </div>
+
+	  <div>
+		<br><input type="submit" id="fit-model-button" value="Fit model" disabled="disabled" class="submit-button-simple">
+	  </div>
+
+	</form>
+
+	<div id="fit_progress" class="progress" data-label="Fit Progress">
+		<span id="fit_value" class="value"></span>
+	</div>
+
+	<script type="text/javascript">
+        let fitArray = [];
+        let uploadedFitFiles = [];
+        let pendingFitUploads = [];
+        let isUploadingFit = false;
+
+		const dropZone = document.getElementById('fit-drop-zone');
+		const fileInput = document.getElementById('fit-file-input');
+		const fileList = document.getElementById('fit-file-list');
+
+		const fitProgress = document.querySelector('#fit_progress');
+		const fitValue = document.querySelector('#fit_value');
+
+        let selectedRadio = null;
+
+        function checkFormState() {
+            const trainingDataSelected = $('input[name="training_data_option"]:checked').length > 0;
+            const hasUploadedFiles = uploadedFitFiles.length > 0;
+
+            if (trainingDataSelected || hasUploadedFiles) {
+                $('#fit-model-button').prop('disabled', false);
+            } else {
+                $('#fit-model-button').prop('disabled', true);
+            }
+        }
+
+        $(document).ready(function () {
+            selectedRadio = $('input[name="training_data_option"]:checked')[0] || null;
+        });
+
+        $('input[name="training_data_option"]').on('click', function (e) {
+            if (this === selectedRadio) {
+                this.checked = false;
+                selectedRadio = null;
+                checkFormState();
+            } else {
+                selectedRadio = this;
+                checkFormState();
+            }
+        });
+
+        $('input[name="training_data_option"]').on('change', function() {
+            checkFormState();
+        });
+
+        $('#cache_model').on('change', function() {
+            checkFormState();
+        });
+
+        function addFileToList(file, status = 'Pending...') {
+            const fileNameWithSuffix = file.name;
+
+            let existingFileItem = document.querySelector(`[data-file-name="${fileNameWithSuffix}"]`);
+
+            if (!existingFileItem) {
+                const li = document.createElement("li");
+                li.classList.add("file-item");
+                li.setAttribute("data-file-name", fileNameWithSuffix);
+
+                const deletable = makeDeletable(file, li);
+                li.appendChild(deletable);
+
+                const fileName = document.createElement("div");
+                fileName.textContent = fileNameWithSuffix.split('.').slice(0, -1).join('.');
+                fileName.classList.add("file-name");
+                fileName.title = fileNameWithSuffix;
+                li.appendChild(fileName);
+
+                const statusRow = document.createElement("div");
+                statusRow.textContent = status;
+                statusRow.classList.add("file-status");
+                li.appendChild(statusRow);
+
+                const progressBar = document.createElement("div");
+                progressBar.classList.add("progress-bar");
+                li.appendChild(progressBar);
+
+                if (status === 'Uploaded') {
+                    progressBar.style.width = "100%";
+                    progressBar.classList.add("uploaded");
+                }
+
+                file.statusRow = statusRow;
+                file.liElement = li;
+                file.progressBar = progressBar;
+
+                fileList.prepend(li);
+            }
+        }
+
+        async function uploadFitFiles() {
+            if (isUploadingFit) return;
+            isUploadingFit = true;
+
+            while (fitArray.length > 0) {
+                const file = fitArray[0];
+
+                if (!uploadedFitFiles.includes(file.name)) {
+                    const fileItem = document.querySelector(`[data-file-name="${file.name}"]`);
+                    if (fileItem) {
+                        fileItem.querySelector('.file-status').textContent = 'Uploading...';
+                    }
+
+                    await uploadFile(file, updateProgressBarFit, true);
+                    uploadedFitFiles.push(file.name);
+                    checkFormState();
+                }
+
+                fitArray.shift();
+            }
+
+            isUploadingFit = false;
+
+            if (pendingFitUploads.length > 0) {
+                fitArray.push(...pendingFitUploads);
+                pendingFitUploads = [];
+                uploadFiles();
+            }
+        }
+
+        function addFilesAndUpload(files) {
+            files.forEach(file => {
+                fitArray.push(file);
+                addFileToList(file);
+            });
+            uploadFitFiles();
+        }
+
+        function updateProgressBarFit(file, progress, text = '', fileName = null) {
+            const finalFileName = fileName || file.name;
+            const fileItem = document.querySelector(`[data-file-name="${finalFileName}"]`);
+            if (!fileItem) return;
+
+            const progressBar = fileItem.querySelector('.progress-bar');
+            const statusRow = fileItem.querySelector('.file-status');
+            const submitButton = fileItem.querySelector('.submit-btn');
+
+            if (progressBar) {
+                progressBar.style.width = `${progress}%`;
+
+                if (progress >= 100) {
+                    statusRow.textContent = 'Uploaded';
+                    progressBar.classList.add("uploaded");
+                } else if (text) {
+                    statusRow.textContent = `${text} ${Math.round(progress)}%`;
+                } else {
+                    statusRow.textContent = `Uploading... ${Math.round(progress)}%`;
+                }
+            }
+        }
+
+        (function($) {
+            let form = $('#fit-model-form');
+            form.on('submit', function(e){
+                e.preventDefault();
+
+                let $this = $(this);
+                let method = $this.attr('method');
+                let action = $(this).attr('action');
+                let data = $this.serialize();
+
+                var form_data = new FormData(form[0]);
+
+                uploadedFitFiles.forEach(function(file) {
+                    form_data.append('uploaded_files[]', file);
+                });
+
+                const cacheModelChecked = $('#cache_model').prop('checked') ? 'true' : 'false';
+                const trainingRadio = $('input[name="training_data_option"]:checked');
+                const trainingDataSelected = trainingRadio.length > 0;
+                const trainingDataValue = trainingDataSelected ? trainingRadio.val() : null;
+
+                form_data.append('cache_model', cacheModelChecked);
+                form_data.append('include_training_data', trainingDataSelected);
+                form_data.append('training_chan', trainingDataValue);
+
+                $.ajax({
+                    method: method,
+                    url: action,
+                    data: form_data,
+
+                    cache: false,
+                    contentType: false,
+                    processData: false,
+
+                    success: function(response) {
+                        task_state(response.task_id, Date.now());
+                        $('#fit-model-button').prop('disabled', true);
+                    },
+
+                    error: function (response) {
+                        alert(response["responseJSON"]["error"]);
+                    }
+                });
+            });
+        })(jQuery);
+
+		function task_state(task_id, startTime) {
+			$.ajax({
+				method: 'GET',
+				url: {% url 'validate_task_state' %},
+				data: {'task_id': task_id},
+				cache: false,
+
+				success: function(response){
+					if (response.state != 'SUCCESS') {
+						if (response.state == 'FAILURE') {
+							update_progress('Failed. Did you add sleep scores to the new data?');
+						} else {
+							if (`${response.state}` == 'PENDING') {
+								update_progress('Processing...');
+							} else if (response.state == 'FITTING') {
+								var elapsedTime = Math.floor((Date.now() - startTime) / update_ms);
+								const minutes = Math.floor(elapsedTime / 60);
+								const seconds = elapsedTime % 60;
+
+								update_progress(`Fitting, time elapsed: ${padTo2Digits(minutes)}:${padTo2Digits(seconds)}`);
+							}
+							setTimeout(function () {
+								task_state(task_id, startTime);
+							}, update_ms);
+						}
+					} else if (response.state == 'SUCCESS') {
+                        update_progress('DONE!');
+                        download_file(task_id, {% url 'download_model' %}, "trained_model.file", true, true);
+                    }
+				},
+				error: function (response){
+					alert(response["responseJSON"]["error"]);
+				}
+			});
+		};
+
+		function update_progress(update_text, update_num) {
+			if (update_num === 100) {
+				fitValue.style.width = `${update_num}%`;
+				fitProgress.setAttribute('data-label', `${update_text}`);
+			} else if (!isNaN(update_num)) {
+				fitValue.style.width = `${update_num}%`;
+				fitProgress.setAttribute('data-label', `${update_num}% ${update_text}`);
+			} else {
+				fitProgress.setAttribute('data-label', `${update_text}`);
+			}
+		}
+
+        dropZone.addEventListener("drop", (event) => {
+            event.preventDefault();
+            let newFiles = Array.from(event.dataTransfer.files);
+
+            fitArray = [...fitArray, ...newFiles];
+
+            newFiles.forEach((file) => {
+                addFileToList(file);
+            });
+        });
+
+    	dropZone.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            dropZone.classList.add("drag-over");
+        });
+
+        dropZone.addEventListener("dragleave", () => {
+            dropZone.classList.remove("drag-over");
+        });
+
+        dropZone.addEventListener("click", (event) => {
+            if (!event.target.classList.contains('trash-icon') && !event.target.closest('.trash-icon')) {
+                if (!event.target.classList.contains('submit-btn')) {
+                    fileInput.click();
+                }
+            }
+        });
+
+        fileInput.addEventListener("change", () => {
+            let newFiles = Array.from(fileInput.files);
+
+            newFiles.forEach((file) => {
+                if (!fitArray.some(f => f.name === file.name) && !uploadedFitFiles.includes(file.name)) {
+                    fitArray.push(file);
+                    addFileToList(file);
+                }
+            });
+
+            uploadFitFiles();
+            fileInput.value = "";
+        });
+	</script>
+{% endblock %}

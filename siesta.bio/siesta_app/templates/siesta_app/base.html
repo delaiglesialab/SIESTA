@@ -1,0 +1,282 @@
+{% load static %}
+{% load widget_tweaks %}
+{% load env %}
+
+<!doctype html>
+<html lang="en">
+<head>
+    <!-- Required meta tags -->
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+    <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/js/bootstrap.min.js"></script>
+    <script src="https://unpkg.com/htmx.org@1.2.1"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/2.6.0/umd/popper.min.js" integrity="sha512-BmM0/BQlqh02wuK5Gz9yrbe7VyIVwOzD1o40yi1IsTjriX/NGF37NyXHfmFzIlMmoSIBXgqDiG1VNU6kB5dBbA==" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/gh/ethereumjs/browser-builds/dist/ethereumjs-tx/ethereumjs-tx-1.3.3.min.js"></script>
+
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/css/bootstrap.min.css">
+    <link rel="stylesheet" type="text/css" href="/static/admin/css/style.css">
+
+    {% block page_meta %}
+    {% endblock %}
+</head>
+<body>
+	<div id="nav_container">
+		<div class= 'sidebar'>
+
+			<section><a href hx-get="{% url 'index' %}"
+					hx-push-url="true" hx-target="#content" hx-swap="innerHTML"
+					hx-indicator="#content-loader"><h1>Home</h1></a></section>
+
+			<section><a href hx-get="{% url 'extract_features' %}" hx-push-url="true"
+					hx-target="#content" hx-swap="innerHTML"
+					hx-indicator="#content-loader"><h1>Feature Extraction</h1></a></section>
+
+			<section><a href hx-get="{% url 'score_data' %}" hx-push-url="true"
+					hx-target="#content" hx-swap="innerHTML"
+					hx-indicator="#content-loader"><h1>Score Data</h1></a></section>
+
+			<section><a href hx-get="{% url 'merge_data' %}" hx-push-url="true"
+					hx-target="#content" hx-swap="innerHTML"
+					hx-indicator="#content-loader"><h1>Merge Data</h1></a></section>
+
+			<section><a href hx-get="{% url 'fit_model' %}" hx-push-url="true"
+					hx-target="#content" hx-swap="innerHTML"
+					hx-indicator="#content-loader"><h1>Fit New Model</h1></a></section>
+		</div>
+
+		<div id="content">
+		{% block content %}
+		{% endblock %}
+		</div>
+
+	</div>
+
+<script type="text/javascript">
+    const update_ms = 1000;
+
+    function getCookie(name) {
+        const cookieValue = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+        return cookieValue ? cookieValue.pop() : '';
+    }
+
+    function updateTimer(actionText, startTime) {
+        var elapsedTime = Math.floor((Date.now() - startTime) / update_ms);
+
+        const minutes = Math.floor(elapsedTime / 60);
+        const seconds = elapsedTime % 60;
+
+        return `${actionText} time elapsed: ${padTo2Digits(minutes)}:${padTo2Digits(seconds)}`;
+    }
+
+    function download_file(task_id, download_url, filename, saveToServer = false, handleHeaders = false) {
+        $.ajax({
+            method: 'GET',
+            url: download_url,
+            data: {
+                'task_id': task_id,
+                'filename': filename,
+                'save_to_server': saveToServer
+            },
+
+            xhrFields: {
+                responseType: 'blob'
+            },
+
+            success: function (response, status, xhr) {
+                var disposition = xhr.getResponseHeader('Content-Disposition');
+                if (!filename && disposition && disposition.indexOf('attachment') !== -1) {
+                    var filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+                    var matches = filenameRegex.exec(disposition);
+                    if (matches != null && matches[1]) filename = matches[1].replace(/['"]/g, '');
+                }
+
+                if (typeof window.navigator.msSaveBlob !== 'undefined') {
+                    window.navigator.msSaveBlob(response, filename);
+                } else {
+                    var URL = window.URL || window.webkitURL;
+                    var downloadUrl = URL.createObjectURL(response);
+
+                    if (filename) {
+                        var a = document.createElement("a");
+                        if (typeof a.download === 'undefined') {
+                            window.location.href = downloadUrl;
+                        } else {
+                            a.href = downloadUrl;
+                            a.download = filename;
+                            document.body.appendChild(a);
+                            a.click();
+                        }
+                    } else {
+                        window.location.href = downloadUrl;
+                    }
+
+                    setTimeout(function () {
+                        URL.revokeObjectURL(downloadUrl);
+                    }, 100); // cleanup
+                }
+
+                if (handleHeaders) {
+                    const modelName = xhr.getResponseHeader('X-Model-Name');
+
+                    if (xhr.getResponseHeader('X-Cache-New-Model') === 'true' && modelName) {
+                        sessionStorage.setItem('newModel', modelName);
+                    }
+                }
+            },
+            error: function (response, status, xhr) {
+                alert(response["responseJSON"]["error"]);
+            }
+        });
+    };
+
+    function storeInSession(key, value) {
+        sessionStorage.setItem(key, value);
+    }
+
+    async function fileExistsOnServer(fileName, deleteFile = false) {
+        const url = `/check-file-exists/?fileName=${encodeURIComponent(fileName)}${deleteFile ? '&delete=true' : ''}`;
+
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+            const data = await response.json();
+            return data.exists;
+        } catch (error) {
+            console.error('Error checking file:', error);
+            return false; // Return false if there's an error
+        }
+    }
+
+    async function uploadFile(file, updateProgressBar, deleteFile = false) {
+        let originalFileName = file.name;
+        let fileName = originalFileName;
+        let fileExtension = fileName.split('.').pop();
+        let baseName = fileName.replace(`.${fileExtension}`, "");
+
+        let counter = 1;
+        while (await fileExistsOnServer(fileName, deleteFile)) {
+            fileName = `${baseName}(${counter}).${fileExtension}`;
+            counter++;
+        }
+
+        const fileItem = document.querySelector(`[data-file-name="${originalFileName}"]`);
+        if (fileItem) {
+            fileItem.setAttribute("data-file-name", fileName);
+
+            const fileNameElement = fileItem.querySelector(".file-name");
+            if (fileNameElement) {
+                fileNameElement.textContent = fileName;
+            }
+
+            const statusRow = fileItem.querySelector('.file-status');
+            if (statusRow) {
+                statusRow.textContent = 'Uploading...';
+            }
+        }
+
+        const chunkSize = 1024 * 1024 * 10; // 10 MB per chunk
+        const totalChunks = Math.ceil(file.size / chunkSize);
+        let uploadedChunks = 0;
+
+        for (let start = 0; start < file.size; start += chunkSize) {
+            const chunk = file.slice(start, start + chunkSize);
+            const formData = new FormData();
+            formData.append('file', chunk);
+            formData.append('chunkIndex', uploadedChunks);
+            formData.append('totalChunks', totalChunks);
+            formData.append('fileName', fileName);
+
+            try {
+                uploadedChunks++;
+
+                const progressBar = fileItem ? fileItem.querySelector('.progress-bar') : null;
+                if (progressBar) {
+                    await uploadChunk(formData, (loaded) => {
+                        updateProgressBar(file, Math.min((uploadedChunks / totalChunks) * 100, 100), '', fileName);
+                    }, fileName);
+                } else {
+                    await uploadChunk(formData, null, fileName);
+                }
+            } catch (error) {
+                if (fileItem) {
+                    const statusRow = fileItem.querySelector('.file-status');
+                    if (statusRow) {
+                        statusRow.textContent = 'Upload Failed';
+                    }
+                }
+                return;
+            }
+        }
+
+        if (fileItem) {
+            const finalProgressBar = fileItem.querySelector('.progress-bar');
+            if (finalProgressBar) {
+                updateProgressBar(file, 100, 'Upload Complete', fileName);
+            }
+        }
+    }
+
+    async function uploadChunk(formData, progressCallback, fileName) {
+        try {
+            formData.append('fileName', fileName);
+
+            // Perform the POST request to upload the chunk
+            const response = await fetch('/upload-file/', {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'X-CSRFToken': '{{ csrf_token }}'  // Ensure CSRF token is injected properly
+                }
+            });
+
+            // If the response is not OK, throw an error
+            if (!response.ok) {
+                throw new Error('Failed to upload chunk');
+            }
+
+            // Assuming the server returns a JSON with the progress status or chunk upload status
+            const data = await response.json();  // Adjust to response.json() if the server returns JSON
+
+            // Call progressCallback with data from the server (if needed)
+            if (progressCallback) {
+                progressCallback(data, fileName);  // Provide the server response or progress data
+            }
+
+        } catch (error) {
+            console.error("Error uploading chunk:", error);
+            throw error;  // Rethrow the error to be handled elsewhere
+        }
+    }
+
+    function makeDeletable(file, li) {
+        const trashIcon = document.createElement("span");
+        trashIcon.classList.add("trash-icon");
+        trashIcon.title = "Delete file";
+        trashIcon.textContent = "🗑️";
+        trashIcon.style.cursor = "pointer";
+        trashIcon.style.marginRight = "10px";
+        trashIcon.style.zIndex = "2";
+
+        trashIcon.addEventListener("click", () => {
+            fileExistsOnServer(file.name, true);
+            li.remove();
+            scoreArray = scoreArray.filter((f) => f.name !== file.name);
+        });
+
+        return trashIcon;
+    }
+
+    function delay(ms) {
+        return new Promise.resolve(setTimeout(resolve, ms));
+    }
+
+    function padTo2Digits(num) {
+        return num.toString().padStart(2, '0');
+    }
+</script>
+</body>
+</html>

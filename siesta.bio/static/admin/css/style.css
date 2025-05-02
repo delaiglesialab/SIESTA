@@ -1,0 +1,254 @@
+* {
+margin:0;
+padding:0;
+}
+
+#nav_container {
+	display: table;
+	width: 100%;
+	height: 100%;
+	min-height: 100vh;
+	font-family: Montserrat, sans-serif;
+}
+
+#sidebar {
+	display: table-cell;
+	width: 10%;
+	vertical-align: top;
+}
+
+#content {
+	display: table-cell;
+	width: 90%;
+	vertical-align: top;
+}
+
+#form {
+    width: 20%;
+    height: 20%;
+}
+
+table, td {
+  border: 1px solid black;
+  padding: 5px;
+}
+table {
+  border-spacing: 15px;
+}
+
+
+#new-model-prompt, #new-model-file {
+    visibility: hidden;
+}
+
+
+.progress {
+  height: 3rem;
+  width: 40rem;
+  border-radius: 0.4rem;
+
+  background-color: #c9c9c9;
+  position: relative;
+}
+.progress:before {
+  content: attr(data-label);
+  font-size: 1em;
+  position: absolute;
+  text-align: center;
+  top: 5px;
+  left: 0;
+  right: 0;
+}
+.progress .value {
+  background-color: #7cc4ff;
+  display: inline-block;
+  height: 100%;
+}
+
+
+.alert {
+    position: relative;
+    opacity: 1;
+    visibility: visible;
+    transform: translateX(0px);
+    transition: visibility 0s, opacity 500ms, transform 500ms;
+}
+.alert.hide {
+    position: relative;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateX(-10px); // translateX, translateY, translateZ works well
+    transition: visibility 0s 500ms, opacity 500ms, transform 500ms;
+}
+
+.form-row {
+    display: flex;
+    align-items: center;
+  }
+
+.file-label {
+    margin-right: 10px;
+	margin-top: 4px;
+  }
+
+.radio-container {
+  display: flex;
+  align-items: center;
+}
+
+.radio-container input[type="radio"] {
+  margin-right: 4px;
+  margin-top: -4px;
+}
+
+.submit-button-simple {
+  background-color: green;
+  color: white;
+  font-weight: bold;
+  padding: 4px 8px; /* Adjusts the size of the button */
+  font-size: 18px; /* Increases the font size */
+  border-radius: 5px; /* Optional: Rounds the corners of the button */
+}
+
+.submit-button-simple:disabled {
+  background-color: gray;
+  color: lightgray;
+}
+
+
+.inline-form {
+    display: flex;
+    align-items: center;
+    gap: 10px; /* Adjust spacing between elements */
+    flex-wrap: wrap; /* Ensures elements wrap if screen is too small */
+}
+
+.inline-form .form-group {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.inline-form label {
+    white-space: nowrap; /* Prevents labels from wrapping */
+}
+
+.inline-form input,
+.inline-form select {
+    height: 30px; /* Adjust input height */
+}
+
+.submittable-button {
+    height: 10px; /* Ensure button height matches inputs */
+}
+
+
+.drop-zone {
+    width: 500px;
+    height: 400px;
+    padding: 20px;
+    background-color: #282828;  /* Dark background color */
+    text-align: center;
+    cursor: pointer;
+    margin-bottom: 10px;
+    color: #fff; /* White text color */
+}
+
+.drop-zone p {
+    color: #fff; /* Ensure the paragraph text is white */
+}
+
+.drop-zone.drag-over {
+    background-color: #f0f8ff;
+}
+
+.file-list {
+    height: 90%;  /* Set a height for the scrollable area */
+    overflow-y: auto;  /* Allow vertical scrolling when content overflows */
+    margin-top: 20px;
+    padding-right: 20px; /* Optional: Adds space for the scrollbar */
+    list-style-type: none;  /* Remove bullet points */
+    padding: 0;  /* Remove default padding */
+}
+
+.file-item {
+    margin-bottom: 2px;
+    background-color: #f3f3f3;
+    border-radius: 5px;
+    position: relative;
+    padding-right: 25px;
+    width: 100%;
+    box-sizing: border-box;
+    display: flex; /* Use flexbox for layout */
+    padding: 5px; /* Add some padding for better spacing */
+}
+
+
+.trash-icon {
+    margin-right: 10px; /* Space between the trash icon and the file name */
+    cursor: pointer; /* Make the trash icon clickable */
+    color: #ff0000; /* Red color for the trash icon */
+}
+
+.file-name, .file-status {
+    flex: 1; /* Allow file name and status to take up available space */
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;
+    position: relative;
+    z-index: 2;
+    color: #333;  /* Darker text color for file name/status */
+}
+
+.file-name {
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.file-status {
+    font-size: 14px;
+    color: #bbb;
+    padding-right: 50px;
+}
+
+.progress-bar {
+    background-color: #96bfeb;
+    height: 100%;
+    width: 0%;
+    border-radius: 5px;
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    z-index: 1;
+}
+
+.progress-bar.uploaded {
+    background-color: #a4dbb3;
+}
+
+.progress-bar.downloaded {
+    background-color: #96b09c;
+}
+
+.submit-btn {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    padding: 5px 10px;
+    background-color: #007bff;
+    color: white;  /* White text for the submit button */
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    z-index: 2;
+}
+
+.submit-btn:hover {
+    background-color: #0056b3;
+}
+
+.file-status {
+    color: #191a19; /* Change to your desired color */
+}
